@@ -104,7 +104,12 @@ const loadInventory = async () => {
   try { inventory.value = await getInventory() } catch (e) { ElMessage.error(e.message) }
 }
 const refreshAll = async () => {
-  await Promise.all([loadUser(), loadPlots(), loadInventory()])
+  try {
+    await Promise.all([loadUser(), loadPlots(), loadInventory()])
+    ElMessage.success({ message: '数据已刷新', duration: 1200, showClose: false })
+  } catch (e) {
+    ElMessage.error('刷新失败')
+  }
 }
 
 const onPlotClick = (plot) => {
@@ -119,7 +124,7 @@ const onPlotClick = (plot) => {
 
 const handlePlant = async (cropId) => {
   try {
-    const res = await plantCrop(selectedPlotIndex.value + 1, cropId)
+    const res = await plantCrop(selectedPlotIndex.value, cropId)
     ElMessage.success(res.message)
     seedDialogVisible.value = false
     await refreshAll()
@@ -128,7 +133,7 @@ const handlePlant = async (cropId) => {
 
 const handleWater = async () => {
   try {
-    const res = await waterPlot(selectedPlot.value.index + 1)
+    const res = await waterPlot(selectedPlot.value.index)
     ElMessage.success(res.message)
     actionVisible.value = false
     await refreshAll()
@@ -137,7 +142,7 @@ const handleWater = async () => {
 
 const handleHarvest = async () => {
   try {
-    const res = await harvestPlot(selectedPlot.value.index + 1)
+    const res = await harvestPlot(selectedPlot.value.index)
     ElMessage.success(res.message)
     if (res.levelUp) {
       ElMessage({ type: 'success', message: `🎉 升级到 Lv.${res.newLevel}！`, duration: 3000 })
@@ -149,7 +154,7 @@ const handleHarvest = async () => {
 
 const handleClear = async () => {
   try {
-    const res = await clearPlot(selectedPlot.value.index + 1)
+    const res = await clearPlot(selectedPlot.value.index)
     ElMessage.success(res.message)
     actionVisible.value = false
     await refreshAll()

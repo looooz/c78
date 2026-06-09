@@ -112,13 +112,13 @@ const drawPlot = (ctx, plot, rect, isHovered) => {
 
   drawCrop(ctx, plot, rect)
 
-  if (plot.crop_id && !plot.is_harvested && plot.status !== 'ready') {
+  if (plot.cropId && !plot.isHarvested && plot.status !== 'ready') {
     drawProgress(ctx, plot, rect)
   }
 
   drawStatusBadge(ctx, plot, rect)
 
-  if (plot.status === 'empty' || (!plot.crop_id && !plot.is_harvested)) {
+  if (plot.status === 'empty' || (!plot.cropId && !plot.isHarvested)) {
     ctx.save()
     ctx.font = 'bold 18px sans-serif'
     ctx.fillStyle = 'rgba(255,255,255,0.7)'
@@ -205,7 +205,7 @@ const drawStatusBadge = (ctx, plot, rect) => {
   let badge = null
   if (plot.status === 'ready') badge = { text: '可收获', color: '#FF6F00' }
   else if (plot.status === 'harvested') badge = { text: '已收获', color: '#757575' }
-  else if (plot.status === 'growing_dry' && plot.crop_id) badge = { text: '需浇水', color: '#E53935' }
+  else if (plot.status === 'growing_dry' && plot.cropId) badge = { text: '需浇水', color: '#E53935' }
 
   if (!badge) return
 
@@ -253,9 +253,11 @@ const render = () => {
   roundRect(ctx, 10, 10, canvasWidth - 20, canvasHeight - 20, 24)
   ctx.fill()
 
+  const plotMap = new Map()
+  props.plots.forEach(p => plotMap.set(p.index, p))
+
   for (let i = 0; i < 6; i++) {
-    const plot = props.plots[i] || { status: 'empty', index: i }
-    plot.index = i
+    const plot = plotMap.get(i) || { status: 'empty', index: i, watered: false, crop_id: null, is_harvested: false }
     drawPlot(ctx, plot, getPlotRect(i), hoveredIndex.value === i)
   }
 
@@ -286,8 +288,9 @@ const getIndexFromEvent = (e) => {
 const onCanvasClick = (e) => {
   const idx = getIndexFromEvent(e)
   if (idx === -1) return
-  const plot = props.plots[idx] || { index: idx, status: 'empty' }
-  plot.index = idx
+  const plotMap = new Map()
+  props.plots.forEach(p => plotMap.set(p.index, p))
+  const plot = plotMap.get(idx) || { index: idx, status: 'empty', watered: false, cropId: null, isHarvested: false }
   emit('plot-click', plot)
 }
 

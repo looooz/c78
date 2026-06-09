@@ -27,7 +27,10 @@
       <div v-if="plot.cropId && plot.status !== 'harvested'" class="info-grid">
         <div class="info-item">
           <span class="label">💰 预计收入</span>
-          <span class="value">{{ plot.sellPrice }} 金币</span>
+          <span class="value">
+            {{ Math.floor(plot.sellPrice * (plot.yieldBonus || 1)) }} 金币
+            <span v-if="plot.yieldBonus && plot.yieldBonus < 1" style="font-size:12px;color:#e6a23c">(减产至{{ Math.floor(plot.yieldBonus * 100) }}%)</span>
+          </span>
         </div>
         <div class="info-item">
           <span class="label">⭐ 预计经验</span>
@@ -112,7 +115,7 @@ const statusText = computed(() => {
   switch (p.status) {
     case 'empty': return '空地'
     case 'growing_watered': return '🌱 生长中(已浇水)'
-    case 'growing_dry': return '🌾 生长中(需要浇水'
+    case 'growing_dry': return '🌾 生长中(需要浇水)'
     case 'ready': return '🎉 可收获'
     case 'harvested': return '已收获'
     default: return ''

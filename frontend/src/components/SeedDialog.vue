@@ -54,7 +54,7 @@ const visible = computed({
 const seeds = computed(() =>
   props.inventory
     .filter(i => i.type === 'seed' && i.quantity > 0)
-    .map(i => ({ ...i, growTime: (i.sellPrice || 50) * 0.6 }))
+    .map(i => ({ ...i }))
 )
 
 const formatTime = (s) => {

@@ -68,13 +68,14 @@ router.get('/plots', checkUser, (req, res) => {
       progress = Math.min(100, (elapsed / growMs) * 100);
       remaining = Math.max(0, Math.ceil((growMs - elapsed) / 1000));
 
+      if (!p.watered && p.water_count === 0) {
+        yieldBonus = DRY_PENALTY;
+      }
+
       if (progress >= 100) {
         status = 'ready';
       } else {
         status = p.watered ? 'growing_watered' : 'growing_dry';
-        if (!p.watered && p.water_count === 0) {
-          yieldBonus = DRY_PENALTY;
-        }
       }
     } else if (p.is_harvested) {
       status = 'harvested';
@@ -92,6 +93,7 @@ router.get('/plots', checkUser, (req, res) => {
       watered: !!p.watered,
       waterCount: p.water_count,
       yieldBonus,
+      isHarvested: !!p.is_harvested,
       sellPrice: p.sell_price,
       expReward: p.exp_reward,
     };
@@ -102,7 +104,7 @@ router.get('/plots', checkUser, (req, res) => {
 
 router.post('/plant', checkUser, (req, res) => {
   const { plotIndex, cropId } = req.body;
-  if (!plotIndex || !cropId) {
+  if (plotIndex == null || !cropId) {
     return res.status(400).json({ error: '缺少参数' });
   }
 
@@ -119,14 +121,15 @@ router.post('/plant', checkUser, (req, res) => {
   const crop = db.get('SELECT * FROM crops WHERE id = ?', [cropId]);
   if (!crop) return res.status(404).json({ error: '作物不存在' });
 
+  const nowIso = new Date().toISOString();
   db.transaction(() => {
     db.run(
       'UPDATE inventory SET quantity = quantity - 1 WHERE user_id = ? AND item_type = ? AND item_id = ?',
       [DEFAULT_USER_ID, 'seed', cropId]
     );
     db.run(
-      'UPDATE plots SET crop_id = ?, planted_at = CURRENT_TIMESTAMP, watered = 0, water_count = 0, is_harvested = 0 WHERE user_id = ? AND plot_index = ?',
-      [cropId, DEFAULT_USER_ID, plotIndex]
+      'UPDATE plots SET crop_id = ?, planted_at = ?, watered = 0, water_count = 0, is_harvested = 0 WHERE user_id = ? AND plot_index = ?',
+      [cropId, nowIso, DEFAULT_USER_ID, plotIndex]
     );
   });
 
@@ -135,7 +138,7 @@ router.post('/plant', checkUser, (req, res) => {
 
 router.post('/water', checkUser, (req, res) => {
   const { plotIndex } = req.body;
-  if (!plotIndex) return res.status(400).json({ error: '缺少参数' });
+  if (plotIndex == null) return res.status(400).json({ error: '缺少参数' });
 
   const plot = db.get('SELECT * FROM plots WHERE user_id = ? AND plot_index = ?', [DEFAULT_USER_ID, plotIndex]);
   if (!plot) return res.status(404).json({ error: '土地不存在' });
@@ -159,7 +162,7 @@ router.post('/water', checkUser, (req, res) => {
 
 router.post('/harvest', checkUser, (req, res) => {
   const { plotIndex } = req.body;
-  if (!plotIndex) return res.status(400).json({ error: '缺少参数' });
+  if (plotIndex == null) return res.status(400).json({ error: '缺少参数' });
 
   const plot = db.get(`
     SELECT p.*, c.sell_price, c.grow_time, c.exp_reward, c.name
@@ -212,7 +215,7 @@ router.post('/harvest', checkUser, (req, res) => {
 
 router.post('/clear', checkUser, (req, res) => {
   const { plotIndex } = req.body;
-  if (!plotIndex) return res.status(400).json({ error: '缺少参数' });
+  if (plotIndex == null) return res.status(400).json({ error: '缺少参数' });
 
   const plot = db.get('SELECT * FROM plots WHERE user_id = ? AND plot_index = ?', [DEFAULT_USER_ID, plotIndex]);
   if (!plot) return res.status(404).json({ error: '土地不存在' });
@@ -228,7 +231,7 @@ router.post('/clear', checkUser, (req, res) => {
 
 router.get('/inventory', checkUser, (req, res) => {
   const items = db.all(`
-    SELECT i.*, c.name as item_name, c.emoji, c.seed_price, c.sell_price, c.description
+    SELECT i.*, c.name as item_name, c.emoji, c.seed_price, c.sell_price, c.grow_time, c.exp_reward, c.description
     FROM inventory i
     LEFT JOIN crops c ON i.item_id = c.id AND i.item_type = 'seed'
     WHERE i.user_id = ? AND i.quantity > 0
@@ -243,6 +246,8 @@ router.get('/inventory', checkUser, (req, res) => {
     quantity: item.quantity,
     seedPrice: item.seed_price,
     sellPrice: item.sell_price,
+    growTime: item.grow_time,
+    expReward: item.exp_reward,
     description: item.description,
   })));
 });
