@@ -40,6 +40,21 @@ const getPlotRect = (index) => {
   }
 }
 
+const getStageEmoji = (plot) => {
+  const p = Math.min(100, plot.progress || 0)
+  if (p >= 100) return plot.emoji || '🌱'
+  if (p >= 66) return plot.stage3 || '🪴'
+  if (p >= 33) return plot.stage2 || '🌿'
+  return plot.stage1 || '🌱'
+}
+const getStageLabel = (plot) => {
+  const p = Math.min(100, plot.progress || 0)
+  if (p >= 100) return { text: '成熟', color: '#FF6F00' }
+  if (p >= 66) return { text: '青壮', color: '#2E7D32' }
+  if (p >= 33) return { text: '幼苗', color: '#558B2F' }
+  return { text: '发芽', color: '#689F38' }
+}
+
 const drawPlot = (ctx, plot, rect, isHovered) => {
   const { x, y, w, h } = rect
   const radius = 16
@@ -110,6 +125,12 @@ const drawPlot = (ctx, plot, rect, isHovered) => {
   ctx.stroke()
   ctx.restore()
 
+  ctx.save()
+  ctx.font = 'bold 12px sans-serif'
+  ctx.fillStyle = 'rgba(255,255,255,0.85)'
+  ctx.fillText(`#${plot.index + 1}`, x + 12, y + 20)
+  ctx.restore()
+
   drawCrop(ctx, plot, rect)
 
   if (plot.cropId && !plot.isHarvested && plot.status !== 'ready') {
@@ -117,6 +138,7 @@ const drawPlot = (ctx, plot, rect, isHovered) => {
   }
 
   drawStatusBadge(ctx, plot, rect)
+  drawStageLabel(ctx, plot, rect)
 
   if (plot.status === 'empty' || (!plot.cropId && !plot.isHarvested)) {
     ctx.save()
@@ -130,14 +152,37 @@ const drawPlot = (ctx, plot, rect, isHovered) => {
   }
 }
 
+const drawStageLabel = (ctx, plot, rect) => {
+  if (!plot.cropId || plot.isHarvested) return
+  const stage = getStageLabel(plot)
+  const { x, y, w } = rect
+  ctx.save()
+  ctx.font = 'bold 10px sans-serif'
+  const metrics = ctx.measureText(stage.text)
+  const bw = metrics.width + 14
+  const bh = 18
+  const bx = x + w - bw - 8
+  const by = y + 8
+  roundRect(ctx, bx, by, bw, bh, 9)
+  ctx.fillStyle = stage.color
+  ctx.globalAlpha = 0.9
+  ctx.fill()
+  ctx.globalAlpha = 1
+  ctx.fillStyle = '#fff'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(stage.text, bx + bw / 2, by + bh / 2 + 1)
+  ctx.restore()
+}
+
 const drawCrop = (ctx, plot, rect) => {
   const { x, y, w, h } = rect
-  if (!plot.crop_id || plot.is_harvested) return
+  if (!plot.cropId || plot.isHarvested) return
 
   const progress = Math.min(100, plot.progress || 0)
-  const scale = 0.3 + (progress / 100) * 0.7
-  const emoji = plot.emoji || '🌱'
-  const emojiSize = Math.floor(60 * scale)
+  const scaleBase = progress < 33 ? 0.5 : progress < 66 ? 0.7 : progress < 100 ? 0.85 : 1.0
+  const stageEmoji = getStageEmoji(plot)
+  const emojiSize = Math.floor(60 * scaleBase)
 
   if (plot.status === 'ready') {
     ctx.save()
@@ -168,17 +213,17 @@ const drawCrop = (ctx, plot, rect) => {
     ctx.font = `${emojiSize}px sans-serif`
   }
 
-  ctx.fillText(emoji, x + w / 2, y + h / 2 - 10)
+  ctx.fillText(stageEmoji, x + w / 2, y + h / 2 - 10)
   ctx.restore()
 }
 
 const drawProgress = (ctx, plot, rect) => {
-  const { x, y, w } = rect
+  const { x, y, w, h } = rect
   const progress = plot.progress || 0
   const barW = w - 30
   const barH = 10
   const barX = x + 15
-  const barY = y + rect.h - 24
+  const barY = y + h - 24
 
   ctx.save()
   roundRect(ctx, barX, barY, barW, barH, 5)
@@ -196,16 +241,17 @@ const drawProgress = (ctx, plot, rect) => {
   ctx.fillStyle = '#fff'
   ctx.textAlign = 'center'
   const remaining = plot.remaining > 0 ? `${plot.remaining}s` : '即将成熟'
-  ctx.fillText(remaining, barX + barW / 2, barY + 8)
+  ctx.fillText(`${Math.floor(progress)}% · ${remaining}`, barX + barW / 2, barY + 8)
   ctx.restore()
 }
 
 const drawStatusBadge = (ctx, plot, rect) => {
   const { x, y, w } = rect
   let badge = null
-  if (plot.status === 'ready') badge = { text: '可收获', color: '#FF6F00' }
+  if (plot.status === 'ready') badge = { text: '🎉 可收获', color: '#FF6F00' }
   else if (plot.status === 'harvested') badge = { text: '已收获', color: '#757575' }
-  else if (plot.status === 'growing_dry' && plot.cropId) badge = { text: '需浇水', color: '#E53935' }
+  else if (plot.status === 'growing_dry' && plot.cropId) badge = { text: '🔥 需浇水', color: '#E53935' }
+  else if (plot.status === 'growing_watered') badge = { text: '💧 已浇水', color: '#1E88E5' }
 
   if (!badge) return
 
@@ -257,7 +303,7 @@ const render = () => {
   props.plots.forEach(p => plotMap.set(p.index, p))
 
   for (let i = 0; i < 6; i++) {
-    const plot = plotMap.get(i) || { status: 'empty', index: i, watered: false, crop_id: null, is_harvested: false }
+    const plot = plotMap.get(i) || { status: 'empty', index: i, watered: false, cropId: null, isHarvested: false, progress: 0 }
     drawPlot(ctx, plot, getPlotRect(i), hoveredIndex.value === i)
   }
 
@@ -290,7 +336,7 @@ const onCanvasClick = (e) => {
   if (idx === -1) return
   const plotMap = new Map()
   props.plots.forEach(p => plotMap.set(p.index, p))
-  const plot = plotMap.get(idx) || { index: idx, status: 'empty', watered: false, cropId: null, isHarvested: false }
+  const plot = plotMap.get(idx) || { index: idx, status: 'empty', watered: false, cropId: null, isHarvested: false, progress: 0 }
   emit('plot-click', plot)
 }
 

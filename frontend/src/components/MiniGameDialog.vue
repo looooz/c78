@@ -2,7 +2,7 @@
   <el-dialog
     v-model="visible"
     title="🎮 抓水果小游戏"
-    width="520px"
+    width="560px"
     :close-on-click-modal="false"
     center
   >
@@ -11,20 +11,35 @@
         <div class="score-box">
           <span>得分: <b>{{ score }}</b></span>
           <span>⏱ {{ timeLeft }}s</span>
+          <span>难度:
+            <b :class="difficultyClass">{{ difficultyText }}</b>
+          </span>
         </div>
-        <p class="rule">
-          <el-alert
-            v-if="!playing && !gameOver"
-            type="info"
-            :closable="false"
-            show-icon
-          >
-            <span style="font-size: 13px;">
-              30秒内点击<span style="color:#67c23a;"><b>水果</b></span>得10分，
-              点到<span style="color:#f56c6c;"><b>炸弹</b></span>扣5分！
-            </span>
+        <div class="rule-box" v-if="!playing && !gameOver">
+          <el-alert type="info" :closable="false" show-icon>
+            <div class="rule-content">
+              <span>点击<span style="color:#67c23a;"><b>水果</b></span>得{{ difficulty === 'easy' ? 8 : difficulty === 'hard' ? 12 : 10 }}分</span>
+              <span>点到<span style="color:#f56c6c;"><b>炸弹</b></span>扣5分</span>
+              <span>高分可解锁物资奖励！</span>
+            </div>
           </el-alert>
-        </p>
+          <div class="difficulty-row" v-if="!playing && !gameOver">
+            <span class="diff-label">选择难度：</span>
+            <el-radio-group v-model="difficulty" size="default">
+              <el-radio-button value="easy">😊 简单</el-radio-button>
+              <el-radio-button value="normal">🙂 普通</el-radio-button>
+              <el-radio-button value="hard">😤 困难</el-radio-button>
+            </el-radio-group>
+          </div>
+          <div class="reward-table" v-if="!playing && !gameOver">
+            <div class="row row-header">
+              <span>分数段</span><span>奖励倍率</span><span>额外掉落</span>
+            </div>
+            <div class="row"><span>≥ 30分</span><span>简单×0.8 / 普通×1 / 困难×1.5</span><span>45%概率种子/金币</span></div>
+            <div class="row"><span>≥ 80分</span><span>同上</span><span>65%概率高级种子/金币</span></div>
+            <div class="row"><span>≥ 150分</span><span>同上</span><span>85%概率稀有种子/大量金币</span></div>
+          </div>
+        </div>
       </div>
 
       <div class="game-area" @click="onAreaClick">
@@ -37,13 +52,25 @@
         <div v-else-if="gameOver" class="end-screen">
           <div class="big-score">最终得分</div>
           <div class="score-num">{{ score }}</div>
-          <div class="reward-info">
-            <div>💰 金币奖励: <b>{{ score * 2 }}</b></div>
-            <div>⭐ 经验奖励: <b>{{ score }}</b></div>
+          <div class="reward-info" v-if="rewardData">
+            <div class="line base">💰 金币奖励: <b>+{{ rewardData.coins }}</b> (基础 {{ rewardData.baseCoins }}<span v-if="rewardData.bonusCoins"> + 额外{{ rewardData.bonusCoins }}</span>)</div>
+            <div class="line base">⭐ 经验奖励: <b>+{{ rewardData.exp }}</b></div>
+            <div class="line bonus" v-if="rewardData.bonusItems && rewardData.bonusItems.length">
+              🎁 物资奖励：
+              <span v-for="b in rewardData.bonusItems" :key="b.id" class="bonus-item">
+                {{ b.emoji || '🎁' }}{{ b.name }} ×{{ b.qty }}
+              </span>
+            </div>
+            <div class="line lvl" v-if="rewardData.levelUp">🎉 恭喜升级至 <b>Lv.{{ rewardData.newLevel }}</b></div>
           </div>
-          <el-button type="success" size="large" @click="claimReward">
-            领取奖励
-          </el-button>
+          <div class="end-btns">
+            <el-button type="success" size="large" @click="claimReward" v-if="!rewardClaimed">
+              领取奖励
+            </el-button>
+            <el-button type="primary" size="large" @click="restartGame">
+              {{ rewardClaimed ? '再来一局' : '放弃奖励，重新开始' }}
+            </el-button>
+          </div>
         </div>
         <div v-else class="playing-screen">
           <transition-group name="pop" tag="div" class="targets">
@@ -52,7 +79,9 @@
               :key="t.id"
               class="target"
               :style="{
-                left: t.x + '%', top: t.y + '%' }"
+                left: t.x + '%', top: t.y + '%',
+                fontSize: t.size + 'px'
+              }"
               :class="{ bomb: t.bomb }"
               @click.stop="onTargetClick(t)"
             >
@@ -70,6 +99,8 @@
 
 <script setup>
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { claimMiniGameReward } from '../api.js'
+import { ElMessage } from 'element-plus'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -81,13 +112,24 @@ const visible = computed({
   set: v => emit('update:visible', v),
 })
 
-const FRUITS = ['🍎', '🍊', '🍋', '🍉', '🍇', '🍓', '🍑', '🥝', '🍒']
+const FRUITS = ['🍎', '🍊', '🍋', '🍉', '🍇', '🍓', '🍑', '🥝', '🍒', '🍌', '🥭', '🍍']
 
 const score = ref(0)
 const timeLeft = ref(30)
 const playing = ref(false)
 const gameOver = ref(false)
 const targets = ref([])
+const difficulty = ref('normal')
+const rewardData = ref(null)
+const rewardClaimed = ref(false)
+
+const difficultyText = computed(() => ({ easy: '简单', normal: '普通', hard: '困难' }[difficulty.value] || '普通'))
+const difficultyClass = computed(() => ({ easy: 'diff-easy', normal: 'diff-normal', hard: 'diff-hard' }[difficulty.value]))
+const diffConfig = computed(() => ({
+  easy:   { spawn: 1100, life: 2400, bombRate: 0.14, scorePerHit: 8,  size: [40, 54] },
+  normal: { spawn: 780,  life: 1800, bombRate: 0.20, scorePerHit: 10, size: [38, 52] },
+  hard:   { spawn: 520,  life: 1300, bombRate: 0.28, scorePerHit: 12, size: [34, 48] },
+}[difficulty.value]))
 
 let timeTimer = null
 let spawnTimer = null
@@ -99,6 +141,8 @@ const startGame = () => {
   playing.value = true
   gameOver.value = false
   targets.value = []
+  rewardData.value = null
+  rewardClaimed.value = false
 
   clearTimers()
 
@@ -108,25 +152,33 @@ const startGame = () => {
   }, 1000)
 
   const spawn = () => {
-    const isBomb = Math.random() < 0.22
+    if (!playing.value) return
+    const cfg = diffConfig.value
+    const isBomb = Math.random() < cfg.bombRate
+    const [minS, maxS] = cfg.size
     targets.value.push({
       id: ++targetId,
-      x: 5 + Math.random() * 80,
-      y: 5 + Math.random() * 75,
+      x: 8 + Math.random() * 80,
+      y: 8 + Math.random() * 75,
       emoji: FRUITS[Math.floor(Math.random() * FRUITS.length)],
       bomb: isBomb,
+      size: Math.floor(minS + Math.random() * (maxS - minS)),
     })
+    const curId = targetId
     setTimeout(() => {
-      targets.value = targets.value.filter(t => t.id !== targetId)
-    }, 1400)
+      targets.value = targets.value.filter(t => t.id !== curId)
+    }, cfg.life)
   }
   spawn()
-  spawnTimer = setInterval(spawn, 600)
+  spawnTimer = setInterval(spawn, diffConfig.value.spawn)
 }
 
 const onTargetClick = (t) => {
-  if (t.bomb) score.value = Math.max(0, score.value - 5)
-  else score.value += 10
+  if (t.bomb) {
+    score.value = Math.max(0, score.value - 5)
+  } else {
+    score.value += diffConfig.value.scorePerHit
+  }
   targets.value = targets.value.filter(x => x.id !== t.id)
 }
 const onAreaClick = () => {}
@@ -142,8 +194,21 @@ const clearTimers = () => {
   if (spawnTimer) clearInterval(spawnTimer)
   timeTimer = spawnTimer = null
 }
-const claimReward = () => {
-  emit('reward', score.value)
+const claimReward = async () => {
+  try {
+    const res = await claimMiniGameReward(score.value, difficulty.value)
+    rewardData.value = res
+    rewardClaimed.value = true
+    ElMessage.success(res.message)
+    emit('reward', { score: score.value, data: res })
+  } catch (e) {
+    ElMessage.error(e.message)
+  }
+}
+const restartGame = () => {
+  rewardData.value = null
+  rewardClaimed.value = false
+  startGame()
 }
 const close = () => {
   clearTimers()
@@ -158,6 +223,8 @@ watch(visible, v => {
     gameOver.value = false
     playing.value = false
     targets.value = []
+    rewardData.value = null
+    rewardClaimed.value = false
   } else {
     clearTimers()
   }
@@ -167,29 +234,62 @@ onBeforeUnmount(() => clearTimers())
 </script>
 
 <style scoped>
-.game-container {
-  padding: 4px;
-}
-.game-header {
-  margin-bottom: 14px;
-}
+.game-container { padding: 4px; }
+.game-header { margin-bottom: 14px; }
 .score-box {
   display: flex;
   justify-content: space-around;
+  align-items: center;
   font-size: 16px;
   padding: 10px;
   background: linear-gradient(135deg, #fff3e0, #ffe0b2);
   border-radius: 12px;
   margin-bottom: 12px;
 }
-.score-box b {
-  color: #e65100;
-  font-size: 20px;
+.score-box b { color: #e65100; font-size: 20px; }
+.score-box .diff-easy { color: #43a047; }
+.score-box .diff-normal { color: #1e88e5; }
+.score-box .diff-hard { color: #e53935; }
+.rule-box { margin: 0 6px; }
+.rule-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  line-height: 1.6;
 }
-.rule { margin: 0 6px; }
+.difficulty-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 12px 0 8px;
+  flex-wrap: wrap;
+}
+.diff-label { font-size: 14px; font-weight: bold; }
+.reward-table {
+  margin-top: 10px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid #e5e7eb;
+  font-size: 12px;
+}
+.reward-table .row {
+  display: grid;
+  grid-template-columns: 90px 1fr 1fr;
+  padding: 6px 10px;
+  background: #fafafa;
+  border-bottom: 1px solid #e5e7eb;
+}
+.reward-table .row:last-child { border-bottom: none; }
+.reward-table .row-header {
+  background: linear-gradient(135deg, #1976d2, #2196f3);
+  color: #fff;
+  font-weight: bold;
+}
 .game-area {
   position: relative;
-  height: 340px;
+  height: 360px;
   background: linear-gradient(180deg, #e8f5e9 0%, #c8e6c9 100%);
   border-radius: 16px;
   border: 3px solid #a5d6a7;
@@ -204,14 +304,10 @@ onBeforeUnmount(() => clearTimers())
   align-items: center;
   justify-content: center;
   gap: 16px;
+  padding: 20px;
 }
-.start-screen .title {
-  font-size: 80px;
-}
-.big-score {
-  font-size: 20px;
-  color: #666;
-}
+.start-screen .title { font-size: 80px; }
+.big-score { font-size: 20px; color: #666; }
 .score-num {
   font-size: 64px;
   font-weight: bold;
@@ -220,30 +316,39 @@ onBeforeUnmount(() => clearTimers())
 }
 .reward-info {
   background: #fff;
-  padding: 10px 24px;
+  padding: 14px 20px;
   border-radius: 12px;
-  font-size: 15px;
-  line-height: 1.8;
+  font-size: 14px;
+  line-height: 2;
   text-align: center;
+  width: 90%;
+  max-width: 420px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
 }
-.playing-screen {
-  position: relative;
-  width: 100%;
-  height: 100%;
+.reward-info .line { text-align: left; }
+.reward-info .line.base b { color: #f57c00; }
+.reward-info .line.bonus { color: #2e7d32; background: #e8f5e9; padding: 4px 10px; border-radius: 6px; }
+.reward-info .line.bonus b { color: #1b5e20; }
+.reward-info .line.lvl { color: #c62828; font-weight: bold; background: #ffebee; padding: 4px 10px; border-radius: 6px; text-align: center; }
+.bonus-item {
+  display: inline-block;
+  margin: 0 6px;
+  background: #fff3e0;
+  padding: 2px 8px;
+  border-radius: 6px;
 }
-.targets {
-  position: absolute;
-  inset: 0;
-}
+.end-btns { display: flex; gap: 12px; }
+.playing-screen { position: relative; width: 100%; height: 100%; }
+.targets { position: absolute; inset: 0; }
 .target {
   position: absolute;
-  font-size: 44px;
   cursor: pointer;
   transform: translate(-50%, -50%);
-  animation: appear 0.2s ease-out;
+  animation: appear 0.25s ease-out;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.2));
 }
 .target:hover { transform: translate(-50%, -50%) scale(1.15); }
-.target.bomb { animation: appear 0.2s ease-out, shake 0.5s infinite; }
+.target.bomb { animation: appear 0.25s ease-out, shake 0.5s infinite; }
 
 @keyframes appear {
   from { opacity: 0; transform: translate(-50%, -50%) scale(0.3); }

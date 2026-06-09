@@ -21,11 +21,14 @@ const checkUser = (req, res, next) => {
 
 router.get('/user', checkUser, (req, res) => {
   const now = Date.now();
-  const lastCreated = new Date(req.user.created_at).getTime();
-  const elapsed = Math.floor((now - lastCreated) / WATER_REGEN_INTERVAL);
-  const water = Math.min(WATER_MAX, req.user.water + elapsed);
-  if (water !== req.user.water) {
-    db.run('UPDATE users SET water = ? WHERE id = ?', [water, DEFAULT_USER_ID]);
+  const lastUpdate = req.user.last_water_update || req.user.created_at || now;
+  const elapsed = Math.floor((now - lastUpdate) / WATER_REGEN_INTERVAL);
+  let water = Math.min(WATER_MAX, req.user.water + elapsed);
+  if (elapsed > 0 && water !== req.user.water) {
+    db.run(
+      'UPDATE users SET water = ?, last_water_update = ? WHERE id = ?',
+      [water, now, DEFAULT_USER_ID]
+    );
   }
   const user = db.get('SELECT * FROM users WHERE id = ?', [DEFAULT_USER_ID]);
   res.json({
@@ -47,7 +50,13 @@ router.get('/crops', (req, res) => {
 
 router.get('/plots', checkUser, (req, res) => {
   const plots = db.all(`
-    SELECT p.*, c.name as crop_name, c.sell_price, c.grow_time, c.exp_reward, c.emoji
+    SELECT p.*,
+           c.name as crop_name,
+           c.sell_price,
+           c.grow_time,
+           c.exp_reward,
+           c.emoji,
+           c.stage1, c.stage2, c.stage3
     FROM plots p
     LEFT JOIN crops c ON p.crop_id = c.id
     WHERE p.user_id = ?
@@ -62,7 +71,7 @@ router.get('/plots', checkUser, (req, res) => {
     let yieldBonus = 1;
 
     if (p.crop_id && !p.is_harvested) {
-      const planted = new Date(p.planted_at).getTime();
+      const planted = p.planted_at || Date.now();
       const growMs = p.grow_time * 1000;
       const elapsed = now - planted;
       progress = Math.min(100, (elapsed / growMs) * 100);
@@ -87,6 +96,10 @@ router.get('/plots', checkUser, (req, res) => {
       cropId: p.crop_id,
       cropName: p.crop_name,
       emoji: p.emoji,
+      stage1: p.stage1,
+      stage2: p.stage2,
+      stage3: p.stage3,
+      growTime: p.grow_time,
       status,
       progress,
       remaining,
@@ -121,7 +134,7 @@ router.post('/plant', checkUser, (req, res) => {
   const crop = db.get('SELECT * FROM crops WHERE id = ?', [cropId]);
   if (!crop) return res.status(404).json({ error: '作物不存在' });
 
-  const nowIso = new Date().toISOString();
+  const nowMs = Date.now();
   db.transaction(() => {
     db.run(
       'UPDATE inventory SET quantity = quantity - 1 WHERE user_id = ? AND item_type = ? AND item_id = ?',
@@ -129,11 +142,11 @@ router.post('/plant', checkUser, (req, res) => {
     );
     db.run(
       'UPDATE plots SET crop_id = ?, planted_at = ?, watered = 0, water_count = 0, is_harvested = 0 WHERE user_id = ? AND plot_index = ?',
-      [cropId, nowIso, DEFAULT_USER_ID, plotIndex]
+      [cropId, nowMs, DEFAULT_USER_ID, plotIndex]
     );
   });
 
-  res.json({ success: true, message: `已种植${crop.name}！` });
+  res.json({ success: true, message: `已在${plotIndex + 1}号地种植${crop.name}！`, growTime: crop.grow_time });
 });
 
 router.post('/water', checkUser, (req, res) => {
@@ -144,12 +157,17 @@ router.post('/water', checkUser, (req, res) => {
   if (!plot) return res.status(404).json({ error: '土地不存在' });
   if (!plot.crop_id) return res.status(400).json({ error: '空地无需浇水' });
   if (plot.is_harvested) return res.status(400).json({ error: '已收获无需浇水' });
-  if (plot.watered) return res.status(400).json({ error: '已浇过水了' });
 
-  if (req.user.water <= 0) return res.status(400).json({ error: '水源不足，请稍后再来' });
+  const now = Date.now();
+  const planted = plot.planted_at || now;
+  const growMs = (db.get('SELECT grow_time FROM crops WHERE id = ?', [plot.crop_id])).grow_time * 1000;
+  if (now - planted >= growMs) return res.status(400).json({ error: '作物已成熟，无需浇水' });
+  if (plot.watered) return res.status(400).json({ error: '当前生长阶段已浇过水' });
+
+  if (req.user.water <= 0) return res.status(400).json({ error: '水源不足，请等待水源自动恢复' });
 
   db.transaction(() => {
-    db.run('UPDATE users SET water = water - 1 WHERE id = ?', [DEFAULT_USER_ID]);
+    db.run('UPDATE users SET water = water - 1, last_water_update = ? WHERE id = ?', [now, DEFAULT_USER_ID]);
     db.run(
       'UPDATE plots SET watered = 1, water_count = water_count + 1 WHERE user_id = ? AND plot_index = ?',
       [DEFAULT_USER_ID, plotIndex]
@@ -157,7 +175,7 @@ router.post('/water', checkUser, (req, res) => {
   });
 
   const user = db.get('SELECT water FROM users WHERE id = ?', [DEFAULT_USER_ID]);
-  res.json({ success: true, message: '浇水成功！作物生长加速', water: user.water });
+  res.json({ success: true, message: '浇水成功！产量加成将生效', water: user.water });
 });
 
 router.post('/harvest', checkUser, (req, res) => {
@@ -175,9 +193,9 @@ router.post('/harvest', checkUser, (req, res) => {
   if (plot.is_harvested) return res.status(400).json({ error: '已收获' });
 
   const now = Date.now();
-  const planted = new Date(plot.planted_at).getTime();
+  const planted = plot.planted_at || now;
   const growMs = plot.grow_time * 1000;
-  if (now - planted < growMs) return res.status(400).json({ error: '作物尚未成熟' });
+  if (now - planted < growMs) return res.status(400).json({ error: `作物尚未成熟，还需${Math.ceil((growMs - (now - planted))/1000)}秒` });
 
   let yieldBonus = 1;
   if (plot.water_count === 0) yieldBonus = DRY_PENALTY;
@@ -226,7 +244,7 @@ router.post('/clear', checkUser, (req, res) => {
     [DEFAULT_USER_ID, plotIndex]
   );
 
-  res.json({ success: true, message: '土地已清理' });
+  res.json({ success: true, message: '土地已清理，可重新种植' });
 });
 
 router.get('/inventory', checkUser, (req, res) => {
@@ -305,24 +323,97 @@ router.post('/shop/buy', checkUser, (req, res) => {
   });
 });
 
+const RARE_ITEMS = [
+  { id: 5, emoji: '🥕', name: '胡萝卜种子', rarity: 'rare' },
+  { id: 6, emoji: '🍓', name: '草莓种子', rarity: 'epic' },
+  { id: 7, emoji: '🌽', name: '金币x50', rarity: 'rare', isCoin: true, coinAmount: 50 },
+];
+
 router.post('/mini-game/reward', checkUser, (req, res) => {
-  const { score } = req.body;
-  const s = Math.max(0, Math.min(100, parseInt(score) || 0));
-  const coins = s * 2;
-  const exp = s;
+  const { score, difficulty = 'normal' } = req.body;
+  const s = Math.max(0, Math.min(500, parseInt(score) || 0));
+
+  const diffMult = difficulty === 'easy' ? 0.8 : difficulty === 'hard' ? 1.5 : 1;
+  const coins = Math.floor(s * 2 * diffMult);
+  const exp = Math.floor(s * diffMult);
+
+  let bonusItems = [];
+  let bonusCoins = 0;
+
+  const tiers = [
+    { min: 30, chance: 0.45, pool: [ { type: 'seed', id: 1, qty: 1 }, { type: 'seed', id: 2, qty: 1 }, { type: 'coin', amt: 20 } ] },
+    { min: 80, chance: 0.65, pool: [ { type: 'seed', id: 3, qty: 1 }, { type: 'seed', id: 2, qty: 2 }, { type: 'coin', amt: 50 } ] },
+    { min: 150, chance: 0.85, pool: [ { type: 'seed', id: 4, qty: 1 }, { type: 'seed', id: 3, qty: 2 }, { type: 'coin', amt: 120 } ] },
+  ];
+
+  for (const tier of tiers) {
+    if (s >= tier.min && Math.random() < tier.chance) {
+      const pick = tier.pool[Math.floor(Math.random() * tier.pool.length)];
+      if (pick.type === 'seed') {
+        bonusItems.push(pick);
+      } else if (pick.type === 'coin') {
+        bonusCoins += pick.amt;
+      }
+    }
+  }
 
   const newExp = req.user.exp + exp;
   const newLevel = expToLevel(newExp);
   const levelUp = newLevel > req.user.level;
-  let msg = `小游戏奖励：${coins} 金币，${exp} 经验！`;
-  if (levelUp) msg += ` 🎉 升级到 Lv.${newLevel}！`;
+  const totalCoins = coins + bonusCoins;
 
-  db.run(
-    'UPDATE users SET coins = coins + ?, exp = ?, level = ? WHERE id = ?',
-    [coins, newExp, newLevel, DEFAULT_USER_ID]
-  );
+  let msgParts = [];
+  msgParts.push(`基础奖励：${coins} 金币，${exp} 经验`);
+  if (bonusCoins > 0) msgParts.push(`💰 额外金币 +${bonusCoins}`);
 
-  res.json({ success: true, message: msg, coins, exp, levelUp, newLevel });
+  try {
+    db.transaction(() => {
+      db.run(
+        'UPDATE users SET coins = coins + ?, exp = ?, level = ? WHERE id = ?',
+        [totalCoins, newExp, newLevel, DEFAULT_USER_ID]
+      );
+      for (const bi of bonusItems) {
+        const existing = db.get(
+          'SELECT id FROM inventory WHERE user_id = ? AND item_type = ? AND item_id = ?',
+          [DEFAULT_USER_ID, 'seed', bi.id]
+        );
+        if (existing) {
+          db.run('UPDATE inventory SET quantity = quantity + ? WHERE id = ?', [bi.qty, existing.id]);
+        } else {
+          db.run(
+            'INSERT INTO inventory (user_id, item_type, item_id, quantity) VALUES (?, ?, ?, ?)',
+            [DEFAULT_USER_ID, 'seed', bi.id, bi.qty]
+          );
+        }
+      }
+    });
+  } catch (e) {
+    return res.status(500).json({ error: '奖励发放失败: ' + e.message });
+  }
+
+  const bonusText = bonusItems.map(b => {
+    const crop = db.get('SELECT emoji, name FROM crops WHERE id = ?', [b.id]);
+    return crop ? `${crop.emoji}${crop.name}种子 x${b.qty}` : '';
+  }).filter(Boolean).join('、');
+  if (bonusText) msgParts.push(`🎁 奖励物资：${bonusText}`);
+  if (levelUp) msgParts.push(`🎉 升级到 Lv.${newLevel}！`);
+
+  const user = db.get('SELECT coins FROM users WHERE id = ?', [DEFAULT_USER_ID]);
+  res.json({
+    success: true,
+    message: msgParts.join('；'),
+    coins: totalCoins,
+    baseCoins: coins,
+    bonusCoins,
+    exp,
+    levelUp,
+    newLevel,
+    bonusItems: bonusItems.map(b => {
+      const crop = db.get('SELECT emoji, name FROM crops WHERE id = ?', [b.id]);
+      return crop ? { ...b, emoji: crop.emoji, name: crop.name } : b;
+    }),
+    userCoins: user.coins,
+  });
 });
 
 module.exports = router;

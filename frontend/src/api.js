@@ -34,5 +34,5 @@ export const clearPlot = (plotIndex) =>
 export const buyFromShop = (cropId, quantity = 1) =>
   api.post('/shop/buy', { cropId, quantity })
 
-export const claimMiniGameReward = (score) =>
-  api.post('/mini-game/reward', { score })
+export const claimMiniGameReward = (score, difficulty = 'normal') =>
+  api.post('/mini-game/reward', { score, difficulty })

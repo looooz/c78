@@ -77,7 +77,8 @@ const init = async () => {
       level INTEGER NOT NULL DEFAULT 1,
       exp INTEGER NOT NULL DEFAULT 0,
       water INTEGER NOT NULL DEFAULT 10,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at INTEGER NOT NULL,
+      last_water_update INTEGER NOT NULL
     );
   `);
 
@@ -90,6 +91,9 @@ const init = async () => {
       grow_time INTEGER NOT NULL,
       exp_reward INTEGER NOT NULL,
       emoji TEXT NOT NULL,
+      stage1 TEXT NOT NULL DEFAULT '🌱',
+      stage2 TEXT NOT NULL DEFAULT '🌿',
+      stage3 TEXT NOT NULL DEFAULT '🪴',
       description TEXT
     );
   `);
@@ -100,7 +104,7 @@ const init = async () => {
       user_id INTEGER NOT NULL,
       plot_index INTEGER NOT NULL,
       crop_id INTEGER,
-      planted_at DATETIME,
+      planted_at INTEGER,
       watered INTEGER NOT NULL DEFAULT 0,
       water_count INTEGER NOT NULL DEFAULT 0,
       is_harvested INTEGER NOT NULL DEFAULT 0
@@ -122,15 +126,15 @@ const init = async () => {
   if (cropCount === 0) {
     console.log('🌱 插入初始作物数据...');
     const crops = [
-      [1, '小麦', 20, 40, 30, 10, '🌾', '生长迅速的基础作物'],
-      [2, '玉米', 50, 120, 60, 30, '🌽', '产量高的经济作物'],
-      [3, '番茄', 80, 200, 90, 60, '🍅', '多汁美味的蔬果'],
-      [4, '南瓜', 150, 400, 150, 120, '🎃', '高价值的稀有作物'],
+      [1, '小麦', 20, 40, 45, 10, '🌾', '🌱', '🌿', '🪴', '生长迅速的基础作物'],
+      [2, '玉米', 50, 120, 75, 30, '🌽', '🌱', '🌾', '🌿', '产量高的经济作物'],
+      [3, '番茄', 80, 200, 120, 60, '🍅', '🌱', '🌿', '🪴', '多汁美味的蔬果'],
+      [4, '南瓜', 150, 400, 180, 120, '🎃', '🌱', '🌿', '🍈', '高价值的稀有作物'],
     ];
     transaction(() => {
       for (const c of crops) {
         run(
-          'INSERT INTO crops (id, name, seed_price, sell_price, grow_time, exp_reward, emoji, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO crops (id, name, seed_price, sell_price, grow_time, exp_reward, emoji, stage1, stage2, stage3, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
           c
         );
       }
@@ -140,9 +144,10 @@ const init = async () => {
   const userCount = get('SELECT COUNT(*) as count FROM users').count;
   if (userCount === 0) {
     console.log('👤 创建默认玩家...');
+    const nowMs = Date.now();
     run(
-      'INSERT INTO users (id, username, coins, level, exp, water) VALUES (?, ?, ?, ?, ?, ?)',
-      [1, '农夫小明', 500, 1, 0, 10]
+      'INSERT INTO users (id, username, coins, level, exp, water, created_at, last_water_update) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [1, '农夫小明', 500, 1, 0, 20, nowMs, nowMs]
     );
     const userId = 1;
 

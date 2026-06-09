@@ -24,8 +24,8 @@
       <el-button type="primary" @click="gameVisible = true">
         <el-icon><Trophy /></el-icon> 小游戏
       </el-button>
-      <el-button @click="refreshAll">
-        <el-icon><Refresh /></el-icon> 刷新
+      <el-button @click="refreshAll" :loading="isRefreshing">
+        <el-icon><Refresh /></el-icon> {{ isRefreshing ? '刷新中...' : '刷新' }}
       </el-button>
     </footer>
 
@@ -82,6 +82,7 @@ import {
 const user = ref(null)
 const plots = ref([])
 const inventory = ref([])
+const isRefreshing = ref(false)
 
 const farmRef = ref(null)
 const shopVisible = ref(false)
@@ -103,12 +104,22 @@ const loadPlots = async () => {
 const loadInventory = async () => {
   try { inventory.value = await getInventory() } catch (e) { ElMessage.error(e.message) }
 }
-const refreshAll = async () => {
+const refreshAll = async (showMsg = true) => {
   try {
+    isRefreshing.value = true
     await Promise.all([loadUser(), loadPlots(), loadInventory()])
-    ElMessage.success({ message: '数据已刷新', duration: 1200, showClose: false })
+    if (showMsg) {
+      ElMessage({
+        message: '✅ 农场数据已刷新',
+        type: 'success',
+        duration: 1500,
+        showClose: true,
+      })
+    }
   } catch (e) {
-    ElMessage.error('刷新失败')
+    ElMessage.error('刷新失败：' + e.message)
+  } finally {
+    setTimeout(() => { isRefreshing.value = false }, 500)
   }
 }
 
@@ -170,15 +181,16 @@ const handleBuy = async (cropId, quantity) => {
   } catch (e) { ElMessage.error(e.message) }
 }
 
-const handleGameReward = async (score) => {
+const handleGameReward = async (payload) => {
   try {
-    const res = await claimMiniGameReward(score)
-    ElMessage.success(res.message)
+    const res = payload?.data || payload
+    ElMessage.success(res.message || '奖励发放成功')
     if (res.levelUp) {
       ElMessage({ type: 'success', message: `🎉 升级到 Lv.${res.newLevel}！`, duration: 3000 })
     }
     gameVisible.value = false
     await loadUser()
+    await loadInventory()
   } catch (e) { ElMessage.error(e.message) }
 }
 
