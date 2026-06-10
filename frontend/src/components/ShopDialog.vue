@@ -13,7 +13,7 @@
             v-for="item in seedItems"
             :key="'s-' + item.id"
             class="shop-card"
-            :class="{ 'can-not-afford': userCoins < item.price }"
+            :class="{ 'can-not-afford': userCoins < item.price || !item.unlocked, locked: !item.unlocked }"
           >
             <div class="card-top">
               <span class="emoji">{{ item.emoji }}</span>
@@ -25,6 +25,9 @@
                   <span title="经验">⭐ {{ item.expReward }}</span>
                 </div>
                 <div class="desc">{{ item.description }}</div>
+                <div v-if="!item.unlocked" class="unlock-hint">
+                  <el-tag size="mini" type="info">🔒 Lv.{{ item.unlockLevel }} 解锁</el-tag>
+                </div>
               </div>
             </div>
             <div class="card-bottom">
@@ -40,13 +43,14 @@
                   size="small"
                   controls-position="right"
                   style="width: 100px;"
+                  :disabled="!item.unlocked"
                 />
                 <el-button
                   type="success"
-                  :disabled="userCoins < item.price * (quantities['seed-' + item.id] || 1)"
+                  :disabled="userCoins < item.price * (quantities['seed-' + item.id] || 1) || !item.unlocked"
                   @click="onBuy(item)"
                 >
-                  购买
+                  {{ item.unlocked ? '购买' : '未解锁' }}
                 </el-button>
               </div>
             </div>
@@ -248,6 +252,16 @@ watch(() => props.visible, (v) => {
 }
 .shop-card.can-not-afford {
   background: linear-gradient(145deg, #ffffff, #fff5f5);
+}
+.shop-card.locked {
+  opacity: 0.7;
+  background: linear-gradient(145deg, #fafafa, #f0f0f0);
+}
+.shop-card.locked .emoji {
+  filter: grayscale(1);
+}
+.unlock-hint {
+  margin-top: 6px;
 }
 .card-top {
   display: flex;

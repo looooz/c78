@@ -9,16 +9,50 @@ const WATER_MAX = 20;
 const WATER_REGEN_INTERVAL = 60000;
 const MAX_PROCESSING_QUEUE = 3;
 const PEN_EXPAND_COST = (currentCap) => currentCap * 200;
+const DAILY_FISHING_LIMIT = 10;
+const FISHING_COST = 10;
 
 const expToLevel = (exp) => Math.floor(exp / EXP_PER_LEVEL) + 1;
+
+const getTodayStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+const checkDailyReset = (userId) => {
+  const today = getTodayStr();
+  const existing = db.get('SELECT * FROM daily_stats WHERE user_id = ? AND date = ?', [userId, today]);
+  if (!existing) {
+    db.run('INSERT INTO daily_stats (user_id, date, fishing_count, tasks_completed) VALUES (?, ?, 0, 0)', [userId, today]);
+  }
+  return today;
+};
 
 const addExp = (userId, expAmount) => {
   const user = db.get('SELECT * FROM users WHERE id = ?', [userId]);
   const newExp = user.exp + expAmount;
   const newLevel = expToLevel(newExp);
   const levelUp = newLevel > user.level;
+  let coinReward = 0;
+  let rewardDesc = '';
+
+  if (levelUp) {
+    for (let lvl = user.level + 1; lvl <= newLevel; lvl++) {
+      const reward = db.get('SELECT * FROM level_rewards WHERE level = ?', [lvl]);
+      if (reward) {
+        coinReward += reward.coin_reward;
+        rewardDesc = reward.description;
+      } else {
+        coinReward += lvl * 50;
+      }
+    }
+    if (coinReward > 0) {
+      db.run('UPDATE users SET coins = coins + ? WHERE id = ?', [coinReward, userId]);
+    }
+  }
+
   db.run('UPDATE users SET exp = ?, level = ? WHERE id = ?', [newExp, newLevel, userId]);
-  return { newExp, newLevel, levelUp, oldLevel: user.level };
+  return { newExp, newLevel, levelUp, oldLevel: user.level, coinReward, rewardDesc };
 };
 
 const addInventory = (userId, itemType, itemId, quantity) => {
@@ -78,6 +112,11 @@ router.get('/user', checkUser, (req, res) => {
       [water, now, DEFAULT_USER_ID]
     );
   }
+
+  checkDailyReset(DEFAULT_USER_ID);
+  const today = getTodayStr();
+  const daily = db.get('SELECT * FROM daily_stats WHERE user_id = ? AND date = ?', [DEFAULT_USER_ID, today]);
+
   const user = db.get('SELECT * FROM users WHERE id = ?', [DEFAULT_USER_ID]);
   res.json({
     id: user.id,
@@ -88,6 +127,12 @@ router.get('/user', checkUser, (req, res) => {
     expNextLevel: user.level * EXP_PER_LEVEL,
     water: user.water,
     waterMax: WATER_MAX,
+    daily: {
+      fishingCount: daily ? daily.fishing_count : 0,
+      fishingLimit: DAILY_FISHING_LIMIT,
+      tasksCompleted: daily ? daily.tasks_completed : 0,
+      date: today,
+    },
   });
 });
 
@@ -264,7 +309,7 @@ router.post('/harvest', checkUser, (req, res) => {
     );
   });
 
-  if (levelUpInfo.levelUp) rewardMsg = `🎉 恭喜升级到 Lv.${levelUpInfo.newLevel}！`;
+  if (levelUpInfo.levelUp) rewardMsg = `🎉 恭喜升级到 Lv.${levelUpInfo.newLevel}！奖励 ${levelUpInfo.coinReward} 金币`;
 
   res.json({
     success: true,
@@ -274,6 +319,7 @@ router.post('/harvest', checkUser, (req, res) => {
     yieldBonus,
     levelUp: levelUpInfo.levelUp,
     newLevel: levelUpInfo.newLevel,
+    coinReward: levelUpInfo.coinReward,
   });
 });
 
@@ -302,6 +348,7 @@ router.get('/inventory', checkUser, (req, res) => {
         WHEN 'feed' THEN f.name
         WHEN 'animal_product' THEN ap.name
         WHEN 'processed_product' THEN pp.name
+        WHEN 'fish' THEN fi.name
         ELSE '未知'
       END as item_name,
       CASE i.item_type
@@ -310,6 +357,7 @@ router.get('/inventory', checkUser, (req, res) => {
         WHEN 'feed' THEN f.emoji
         WHEN 'animal_product' THEN ap.emoji
         WHEN 'processed_product' THEN pp.emoji
+        WHEN 'fish' THEN fi.emoji
         ELSE '📦'
       END as emoji,
       CASE i.item_type
@@ -322,6 +370,7 @@ router.get('/inventory', checkUser, (req, res) => {
         WHEN 'animal_product' THEN ap.sell_price
         WHEN 'processed_product' THEN pp.sell_price
         WHEN 'feed' THEN f.price
+        WHEN 'fish' THEN fi.sell_price
         ELSE NULL
       END as sell_price,
       CASE i.item_type
@@ -330,6 +379,7 @@ router.get('/inventory', checkUser, (req, res) => {
       END as grow_time,
       CASE i.item_type
         WHEN 'seed' THEN c.exp_reward
+        WHEN 'fish' THEN fi.exp_reward
         ELSE NULL
       END as exp_reward,
       CASE i.item_type
@@ -338,13 +388,19 @@ router.get('/inventory', checkUser, (req, res) => {
         WHEN 'feed' THEN f.description
         WHEN 'animal_product' THEN ap.description
         WHEN 'processed_product' THEN pp.description
+        WHEN 'fish' THEN fi.description
         ELSE NULL
-      END as description
+      END as description,
+      CASE i.item_type
+        WHEN 'fish' THEN fi.rarity
+        ELSE NULL
+      END as rarity
     FROM inventory i
     LEFT JOIN crops c ON ((i.item_type = 'seed' OR i.item_type = 'crop') AND i.item_id = c.id)
     LEFT JOIN feeds f ON (i.item_type = 'feed' AND i.item_id = f.id)
     LEFT JOIN animal_products ap ON (i.item_type = 'animal_product' AND i.item_id = ap.id)
     LEFT JOIN processed_products pp ON (i.item_type = 'processed_product' AND i.item_id = pp.id)
+    LEFT JOIN fish fi ON (i.item_type = 'fish' AND i.item_id = fi.id)
     WHERE i.user_id = ? AND i.quantity > 0
   `, [DEFAULT_USER_ID]);
 
@@ -360,6 +416,7 @@ router.get('/inventory', checkUser, (req, res) => {
     growTime: item.grow_time,
     expReward: item.exp_reward,
     description: item.description,
+    rarity: item.rarity,
   })));
 });
 
@@ -375,6 +432,8 @@ router.get('/shop', checkUser, (req, res) => {
     expReward: c.exp_reward,
     description: c.description,
     category: '种子',
+    unlockLevel: c.unlock_level || 1,
+    unlocked: req.user.level >= (c.unlock_level || 1),
   }));
 
   const feeds = db.all('SELECT * FROM feeds ORDER BY id').map(f => ({
@@ -386,6 +445,8 @@ router.get('/shop', checkUser, (req, res) => {
     feedValue: f.feed_value,
     description: f.description,
     category: '饲料',
+    unlockLevel: 1,
+    unlocked: true,
   }));
 
   const animals = db.all('SELECT * FROM animals ORDER BY id').map(a => ({
@@ -400,6 +461,8 @@ router.get('/shop', checkUser, (req, res) => {
     expReward: a.exp_reward,
     description: a.description,
     category: '动物',
+    unlockLevel: 1,
+    unlocked: true,
   }));
 
   res.json([...seeds, ...feeds, ...animals]);
@@ -687,7 +750,7 @@ router.post('/animal/collect', checkUser, (req, res) => {
   });
 
   let msg = `收集成功！获得 ${animal.product_emoji}${animal.product_name} x${amount}，${expEarned} 经验`;
-  if (levelUpInfo.levelUp) msg += ` 🎉 升级到 Lv.${levelUpInfo.newLevel}！`;
+  if (levelUpInfo.levelUp) msg += ` 🎉 升级到 Lv.${levelUpInfo.newLevel}！奖励 ${levelUpInfo.coinReward} 金币`;
 
   res.json({
     success: true,
@@ -701,6 +764,7 @@ router.post('/animal/collect', checkUser, (req, res) => {
     exp: expEarned,
     levelUp: levelUpInfo.levelUp,
     newLevel: levelUpInfo.newLevel,
+    coinReward: levelUpInfo.coinReward,
   });
 });
 
@@ -964,6 +1028,11 @@ router.post('/inventory/sell', checkUser, (req, res) => {
     if (!pp) return res.status(404).json({ error: '物品不存在' });
     sellPrice = pp.sell_price;
     itemName = pp.name;
+  } else if (itemType === 'fish') {
+    const fish = db.get('SELECT * FROM fish WHERE id = ?', [itemId]);
+    if (!fish) return res.status(404).json({ error: '物品不存在' });
+    sellPrice = fish.sell_price;
+    itemName = fish.name;
   } else {
     return res.status(400).json({ error: '该物品类型不可出售' });
   }
@@ -1046,7 +1115,7 @@ router.post('/mini-game/reward', checkUser, (req, res) => {
     return crop ? `${crop.emoji}${crop.name}种子 x${b.qty}` : '';
   }).filter(Boolean).join('、');
   if (bonusText) msgParts.push(`🎁 奖励物资：${bonusText}`);
-  if (levelUpInfo.levelUp) msgParts.push(`🎉 升级到 Lv.${levelUpInfo.newLevel}！`);
+  if (levelUpInfo.levelUp) msgParts.push(`🎉 升级到 Lv.${levelUpInfo.newLevel}！奖励 ${levelUpInfo.coinReward} 金币`);
 
   const user = db.get('SELECT coins FROM users WHERE id = ?', [DEFAULT_USER_ID]);
   res.json({
@@ -1058,6 +1127,7 @@ router.post('/mini-game/reward', checkUser, (req, res) => {
     exp,
     levelUp: levelUpInfo.levelUp,
     newLevel: levelUpInfo.newLevel,
+    coinReward: levelUpInfo.coinReward,
     bonusItems: bonusItems.map(b => {
       const crop = db.get('SELECT emoji, name FROM crops WHERE id = ?', [b.id]);
       return crop ? { ...b, emoji: crop.emoji, name: crop.name } : b;
@@ -1136,6 +1206,396 @@ router.get('/animals-corrected', checkUser, (req, res) => {
       expandCost: PEN_EXPAND_COST(pen.capacity),
     },
     animals,
+  });
+});
+
+router.get('/fish', (req, res) => {
+  const fishes = db.all('SELECT * FROM fish ORDER BY id');
+  res.json(fishes.map(f => ({
+    id: f.id,
+    name: f.name,
+    emoji: f.emoji,
+    rarity: f.rarity,
+    sellPrice: f.sell_price,
+    expReward: f.exp_reward,
+    weightMin: f.weight_min,
+    weightMax: f.weight_max,
+    difficulty: f.difficulty,
+    description: f.description,
+  })));
+});
+
+router.get('/fishing/status', checkUser, (req, res) => {
+  checkDailyReset(DEFAULT_USER_ID);
+  const today = getTodayStr();
+  const daily = db.get('SELECT * FROM daily_stats WHERE user_id = ? AND date = ?', [DEFAULT_USER_ID, today]);
+
+  const recent = db.all(`
+    SELECT uf.*, f.name, f.emoji, f.rarity, f.sell_price
+    FROM user_fishing uf
+    JOIN fish f ON uf.fish_id = f.id
+    WHERE uf.user_id = ?
+    ORDER BY uf.caught_at DESC
+    LIMIT 10
+  `, [DEFAULT_USER_ID]);
+
+  res.json({
+    daily: {
+      fishingCount: daily ? daily.fishing_count : 0,
+      fishingLimit: DAILY_FISHING_LIMIT,
+      remaining: daily ? DAILY_FISHING_LIMIT - daily.fishing_count : DAILY_FISHING_LIMIT,
+    },
+    cost: FISHING_COST,
+    recentCatches: recent.map(r => ({
+      id: r.id,
+      fishId: r.fish_id,
+      name: r.name,
+      emoji: r.emoji,
+      rarity: r.rarity,
+      weight: r.weight,
+      sellPrice: r.sell_price,
+      caughtAt: r.caught_at,
+    })),
+  });
+});
+
+const pickFishByAccuracy = (accuracy) => {
+  const allFish = db.all('SELECT * FROM fish');
+  const acc = Math.max(0, Math.min(1, accuracy));
+
+  const weighted = allFish.map(f => {
+    const diffFactor = 1 - Math.abs(f.difficulty - acc);
+    const weight = Math.max(0.1, diffFactor) * (f.rarity === 'common' ? 3 : f.rarity === 'uncommon' ? 2 : f.rarity === 'rare' ? 1 : 0.5);
+    return { fish: f, weight };
+  });
+
+  const totalWeight = weighted.reduce((sum, w) => sum + w.weight, 0);
+  let random = Math.random() * totalWeight;
+
+  for (const w of weighted) {
+    random -= w.weight;
+    if (random <= 0) return w.fish;
+  }
+  return weighted[0].fish;
+};
+
+router.post('/fishing/catch', checkUser, (req, res) => {
+  const { accuracy } = req.body;
+  const acc = accuracy == null ? 0.5 : Math.max(0, Math.min(1, parseFloat(accuracy)));
+
+  checkDailyReset(DEFAULT_USER_ID);
+  const today = getTodayStr();
+  const daily = db.get('SELECT * FROM daily_stats WHERE user_id = ? AND date = ?', [DEFAULT_USER_ID, today]);
+
+  if (daily && daily.fishing_count >= DAILY_FISHING_LIMIT) {
+    return res.status(400).json({ error: `今日钓鱼次数已用完（${DAILY_FISHING_LIMIT}/${DAILY_FISHING_LIMIT}），明天再来吧！` });
+  }
+
+  if (req.user.coins < FISHING_COST) {
+    return res.status(400).json({ error: `金币不足，钓鱼需要 ${FISHING_COST} 金币` });
+  }
+
+  const fish = pickFishByAccuracy(acc);
+  const weight = +(fish.weight_min + Math.random() * (fish.weight_max - fish.weight_min)).toFixed(2);
+  const now = Date.now();
+
+  const qualityBonus = acc > 0.8 ? 1.5 : acc > 0.6 ? 1.2 : acc > 0.4 ? 1 : 0.8;
+  const sellPrice = Math.floor(fish.sell_price * qualityBonus);
+  const expReward = Math.floor(fish.exp_reward * qualityBonus);
+
+  let levelUpInfo = null;
+
+  db.transaction(() => {
+    db.run('UPDATE users SET coins = coins - ? WHERE id = ?', [FISHING_COST, DEFAULT_USER_ID]);
+    db.run('INSERT INTO user_fishing (user_id, fish_id, weight, caught_at) VALUES (?, ?, ?, ?)',
+      [DEFAULT_USER_ID, fish.id, weight, now]);
+    db.run('UPDATE daily_stats SET fishing_count = fishing_count + 1 WHERE user_id = ? AND date = ?',
+      [DEFAULT_USER_ID, today]);
+    addInventory(DEFAULT_USER_ID, 'fish', fish.id, 1);
+    levelUpInfo = addExp(DEFAULT_USER_ID, expReward);
+  });
+
+  const quality = acc > 0.8 ? '完美' : acc > 0.6 ? '优秀' : acc > 0.4 ? '普通' : '勉强';
+  const rarityText = { common: '普通', uncommon: '稀有', rare: '珍稀', epic: '传说' }[fish.rarity] || '普通';
+
+  let msg = `🎣 钓到了 ${fish.emoji}${fish.name}（${rarityText}）！重量 ${weight}kg，品质：${quality}`;
+  if (levelUpInfo.levelUp) msg += ` 🎉 升级到 Lv.${levelUpInfo.newLevel}！奖励 ${levelUpInfo.coinReward} 金币`;
+
+  res.json({
+    success: true,
+    message: msg,
+    fish: {
+      id: fish.id,
+      name: fish.name,
+      emoji: fish.emoji,
+      rarity: fish.rarity,
+      rarityText,
+      weight,
+      sellPrice,
+      expReward,
+      quality,
+      qualityBonus,
+    },
+    cost: FISHING_COST,
+    exp: expReward,
+    levelUp: levelUpInfo.levelUp,
+    newLevel: levelUpInfo.newLevel,
+    coinReward: levelUpInfo.coinReward,
+    remaining: daily ? DAILY_FISHING_LIMIT - daily.fishing_count - 1 : DAILY_FISHING_LIMIT - 1,
+  });
+});
+
+router.get('/offline-earnings', checkUser, (req, res) => {
+  const now = Date.now();
+  const lastLogin = req.user.last_login || req.user.created_at || now;
+  const offlineSeconds = Math.floor((now - lastLogin) / 1000);
+
+  const maxOfflineSeconds = 12 * 60 * 60;
+  const effectiveSeconds = Math.min(offlineSeconds, maxOfflineSeconds);
+
+  if (effectiveSeconds < 60) {
+    return res.json({
+      available: false,
+      offlineSeconds,
+      message: '离线时间太短，没有收益',
+    });
+  }
+
+  let cropEarnings = 0;
+  let cropExp = 0;
+  let harvestedCrops = [];
+
+  const plots = db.all(`
+    SELECT p.*, c.sell_price, c.grow_time, c.exp_reward, c.name, c.emoji
+    FROM plots p
+    JOIN crops c ON p.crop_id = c.id
+    WHERE p.user_id = ? AND p.crop_id IS NOT NULL AND p.is_harvested = 0
+  `, [DEFAULT_USER_ID]);
+
+  for (const plot of plots) {
+    const planted = plot.planted_at || now;
+    const growMs = plot.grow_time * 1000;
+    const offlineElapsed = now - planted;
+
+    if (offlineElapsed >= growMs) {
+      const yieldBonus = plot.water_count > 0 ? 1 : DRY_PENALTY;
+      const coins = Math.floor(plot.sell_price * yieldBonus);
+      const exp = plot.exp_reward;
+      cropEarnings += coins;
+      cropExp += exp;
+      harvestedCrops.push({
+        plotIndex: plot.plot_index,
+        cropId: plot.crop_id,
+        name: plot.name,
+        emoji: plot.emoji,
+        coins,
+        exp,
+      });
+    }
+  }
+
+  let productEarnings = 0;
+  let productExp = 0;
+  let collectedProducts = [];
+
+  const animals = db.all(`
+    SELECT ua.*, a.product_interval, a.product_amount, a.exp_reward,
+           ap.name as product_name, ap.emoji as product_emoji, ap.sell_price as product_price
+    FROM user_animals ua
+    JOIN animals a ON ua.animal_id = a.id
+    JOIN animal_products ap ON a.product_id = ap.id
+    WHERE ua.user_id = ?
+  `, [DEFAULT_USER_ID]);
+
+  for (const animal of animals) {
+    const lastProd = animal.last_product_at || animal.bought_at || now;
+    const prodIntervalMs = animal.product_interval * 1000;
+    const timeSinceLastProd = now - lastProd;
+
+    if (timeSinceLastProd >= prodIntervalMs) {
+      const cycles = Math.floor(timeSinceLastProd / prodIntervalMs);
+      const maxCycles = Math.floor(effectiveSeconds * 1000 / prodIntervalMs);
+      const actualCycles = Math.min(cycles, maxCycles, 10);
+
+      if (actualCycles > 0) {
+        const amount = actualCycles * animal.product_amount;
+        const coins = amount * animal.product_price;
+        const exp = actualCycles * animal.exp_reward;
+        productEarnings += coins;
+        productExp += exp;
+        collectedProducts.push({
+          instanceId: animal.id,
+          productName: animal.product_name,
+          productEmoji: animal.product_emoji,
+          amount,
+          coins,
+          exp,
+          cycles: actualCycles,
+        });
+      }
+    }
+  }
+
+  const totalCoins = cropEarnings + productEarnings;
+  const totalExp = cropExp + productExp;
+
+  const waterRegen = Math.floor(effectiveSeconds / (WATER_REGEN_INTERVAL / 1000));
+  const actualWaterRegen = Math.min(waterRegen, WATER_MAX - req.user.water);
+
+  res.json({
+    available: totalCoins > 0 || totalExp > 0 || actualWaterRegen > 0,
+    offlineSeconds: effectiveSeconds,
+    offlineText: formatDuration(effectiveSeconds),
+    totalCoins,
+    totalExp,
+    waterRegen: actualWaterRegen,
+    crops: {
+      coins: cropEarnings,
+      exp: cropExp,
+      harvested: harvestedCrops,
+    },
+    products: {
+      coins: productEarnings,
+      exp: productExp,
+      collected: collectedProducts,
+    },
+  });
+});
+
+const formatDuration = (seconds) => {
+  if (seconds < 60) return `${seconds}秒`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟`;
+  const hours = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  return mins > 0 ? `${hours}小时${mins}分钟` : `${hours}小时`;
+};
+
+router.post('/offline-earnings/claim', checkUser, (req, res) => {
+  const now = Date.now();
+  const lastLogin = req.user.last_login || req.user.created_at || now;
+  const offlineSeconds = Math.floor((now - lastLogin) / 1000);
+
+  const maxOfflineSeconds = 12 * 60 * 60;
+  const effectiveSeconds = Math.min(offlineSeconds, maxOfflineSeconds);
+
+  if (effectiveSeconds < 60) {
+    return res.status(400).json({ error: '离线时间太短，没有可领取的收益' });
+  }
+
+  let cropEarnings = 0;
+  let cropExp = 0;
+  let harvestedCount = 0;
+
+  const plots = db.all(`
+    SELECT p.*, c.sell_price, c.grow_time, c.exp_reward, c.name
+    FROM plots p
+    JOIN crops c ON p.crop_id = c.id
+    WHERE p.user_id = ? AND p.crop_id IS NOT NULL AND p.is_harvested = 0
+  `, [DEFAULT_USER_ID]);
+
+  for (const plot of plots) {
+    const planted = plot.planted_at || now;
+    const growMs = plot.grow_time * 1000;
+    const offlineElapsed = now - planted;
+
+    if (offlineElapsed >= growMs) {
+      const yieldBonus = plot.water_count > 0 ? 1 : DRY_PENALTY;
+      const coins = Math.floor(plot.sell_price * yieldBonus);
+      const exp = plot.exp_reward;
+      cropEarnings += coins;
+      cropExp += exp;
+      harvestedCount++;
+    }
+  }
+
+  let productEarnings = 0;
+  let productExp = 0;
+  let productAmounts = {};
+
+  const animals = db.all(`
+    SELECT ua.*, a.product_interval, a.product_amount, a.product_id, a.exp_reward,
+           ap.sell_price as product_price
+    FROM user_animals ua
+    JOIN animals a ON ua.animal_id = a.id
+    JOIN animal_products ap ON a.product_id = ap.id
+    WHERE ua.user_id = ?
+  `, [DEFAULT_USER_ID]);
+
+  for (const animal of animals) {
+    const lastProd = animal.last_product_at || animal.bought_at || now;
+    const prodIntervalMs = animal.product_interval * 1000;
+    const timeSinceLastProd = now - lastProd;
+
+    if (timeSinceLastProd >= prodIntervalMs) {
+      const cycles = Math.floor(timeSinceLastProd / prodIntervalMs);
+      const maxCycles = Math.floor(effectiveSeconds / (animal.product_interval));
+      const actualCycles = Math.min(cycles, maxCycles, 10);
+
+      if (actualCycles > 0) {
+        const amount = actualCycles * animal.product_amount;
+        const coins = amount * animal.product_price;
+        const exp = actualCycles * animal.exp_reward;
+        productEarnings += coins;
+        productExp += exp;
+
+        if (!productAmounts[animal.product_id]) {
+          productAmounts[animal.product_id] = 0;
+        }
+        productAmounts[animal.product_id] += amount;
+      }
+    }
+  }
+
+  const totalCoins = cropEarnings + productEarnings;
+  const totalExp = cropExp + productExp;
+
+  if (totalCoins <= 0 && totalExp <= 0) {
+    return res.status(400).json({ error: '没有可领取的离线收益' });
+  }
+
+  let levelUpInfo = null;
+
+  db.transaction(() => {
+    db.run('UPDATE users SET coins = coins + ?, last_login = ? WHERE id = ?',
+      [totalCoins, now, DEFAULT_USER_ID]);
+    levelUpInfo = addExp(DEFAULT_USER_ID, totalExp);
+
+    for (const plot of plots) {
+      const planted = plot.planted_at || now;
+      const growMs = plot.grow_time * 1000;
+      if (now - planted >= growMs) {
+        addInventory(DEFAULT_USER_ID, 'crop', plot.crop_id, 1);
+        db.run('UPDATE plots SET is_harvested = 1 WHERE id = ?', [plot.id]);
+      }
+    }
+
+    for (const animal of animals) {
+      const lastProd = animal.last_product_at || animal.bought_at || now;
+      const prodIntervalMs = animal.product_interval * 1000;
+      if (now - lastProd >= prodIntervalMs) {
+        db.run('UPDATE user_animals SET last_product_at = ? WHERE id = ?', [now, animal.id]);
+      }
+    }
+
+    for (const [prodId, qty] of Object.entries(productAmounts)) {
+      addInventory(DEFAULT_USER_ID, 'animal_product', parseInt(prodId), qty);
+    }
+  });
+
+  let msg = `📦 离线收益已领取：${totalCoins} 金币，${totalExp} 经验`;
+  if (harvestedCount > 0) msg += `，收获 ${harvestedCount} 块作物`;
+  if (levelUpInfo.levelUp) msg += ` 🎉 升级到 Lv.${levelUpInfo.newLevel}！奖励 ${levelUpInfo.coinReward} 金币`;
+
+  res.json({
+    success: true,
+    message: msg,
+    totalCoins,
+    totalExp,
+    harvestedCount,
+    levelUp: levelUpInfo.levelUp,
+    newLevel: levelUpInfo.newLevel,
+    coinReward: levelUpInfo.coinReward,
+    offlineTime: formatDuration(effectiveSeconds),
   });
 });
 

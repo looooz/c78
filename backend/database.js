@@ -78,7 +78,8 @@ const init = async () => {
       exp INTEGER NOT NULL DEFAULT 0,
       water INTEGER NOT NULL DEFAULT 10,
       created_at INTEGER NOT NULL,
-      last_water_update INTEGER NOT NULL
+      last_water_update INTEGER NOT NULL,
+      last_login INTEGER
     );
   `);
 
@@ -94,6 +95,7 @@ const init = async () => {
       stage1 TEXT NOT NULL DEFAULT '🌱',
       stage2 TEXT NOT NULL DEFAULT '🌿',
       stage3 TEXT NOT NULL DEFAULT '🪴',
+      unlock_level INTEGER NOT NULL DEFAULT 1,
       description TEXT
     );
   `);
@@ -226,25 +228,93 @@ const init = async () => {
     );
   `);
 
+  exec(`
+    CREATE TABLE IF NOT EXISTS fish (
+      id INTEGER PRIMARY KEY,
+      name TEXT UNIQUE NOT NULL,
+      emoji TEXT NOT NULL,
+      rarity TEXT NOT NULL DEFAULT 'common',
+      sell_price INTEGER NOT NULL,
+      exp_reward INTEGER NOT NULL,
+      weight_min REAL NOT NULL DEFAULT 0.5,
+      weight_max REAL NOT NULL DEFAULT 5.0,
+      difficulty REAL NOT NULL DEFAULT 0.5,
+      description TEXT
+    );
+  `);
+
+  exec(`
+    CREATE TABLE IF NOT EXISTS user_fishing (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      fish_id INTEGER NOT NULL,
+      weight REAL NOT NULL,
+      caught_at INTEGER NOT NULL
+    );
+  `);
+
+  exec(`
+    CREATE TABLE IF NOT EXISTS daily_stats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      fishing_count INTEGER NOT NULL DEFAULT 0,
+      tasks_completed INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(user_id, date)
+    );
+  `);
+
+  exec(`
+    CREATE TABLE IF NOT EXISTS level_rewards (
+      level INTEGER PRIMARY KEY,
+      coin_reward INTEGER NOT NULL DEFAULT 0,
+      description TEXT
+    );
+  `);
+
   save();
 
   const cropCount = get('SELECT COUNT(*) as count FROM crops').count;
   if (cropCount === 0) {
     console.log('🌱 插入初始作物数据...');
     const crops = [
-      [1, '小麦', 20, 40, 45, 10, '🌾', '🌱', '🌿', '🪴', '生长迅速的基础作物，可制作面包'],
-      [2, '玉米', 50, 120, 75, 30, '🌽', '🌱', '🌾', '🌿', '产量高的经济作物，可用作饲料'],
-      [3, '番茄', 80, 200, 120, 60, '🍅', '🌱', '🌿', '🪴', '多汁美味的蔬果，制作蛋糕必备'],
-      [4, '南瓜', 150, 400, 180, 120, '🎃', '🌱', '🌿', '🍈', '高价值的稀有作物'],
+      [1, '小麦', 20, 40, 45, 10, '🌾', '🌱', '🌿', '🪴', 1, '生长迅速的基础作物，可制作面包'],
+      [2, '玉米', 50, 120, 75, 30, '🌽', '🌱', '🌾', '🌿', 1, '产量高的经济作物，可用作饲料'],
+      [3, '番茄', 80, 200, 120, 60, '🍅', '🌱', '🌿', '🪴', 2, '多汁美味的蔬果，制作蛋糕必备'],
+      [4, '南瓜', 150, 400, 180, 120, '🎃', '🌱', '🌿', '🍈', 3, '高价值的稀有作物'],
+      [5, '草莓', 250, 600, 240, 180, '🍓', '🌱', '🌿', '🍓', 5, '香甜可口的高级水果，深受喜爱'],
+      [6, '蓝莓', 400, 900, 300, 250, '🫐', '🌱', '🌿', '🫐', 8, '营养丰富的珍贵浆果，价值很高'],
     ];
     transaction(() => {
       for (const c of crops) {
         run(
-          'INSERT INTO crops (id, name, seed_price, sell_price, grow_time, exp_reward, emoji, stage1, stage2, stage3, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO crops (id, name, seed_price, sell_price, grow_time, exp_reward, emoji, stage1, stage2, stage3, unlock_level, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
           c
         );
       }
     });
+  } else {
+    const cols = all("PRAGMA table_info(crops)");
+    const colCheck = cols.find(c => c.name === 'unlock_level');
+    if (!colCheck) {
+      console.log('🔧 为作物表添加解锁等级字段...');
+      exec('ALTER TABLE crops ADD COLUMN unlock_level INTEGER NOT NULL DEFAULT 1');
+      run('UPDATE crops SET unlock_level = 1 WHERE id = 1');
+      run('UPDATE crops SET unlock_level = 1 WHERE id = 2');
+      run('UPDATE crops SET unlock_level = 2 WHERE id = 3');
+      run('UPDATE crops SET unlock_level = 3 WHERE id = 4');
+      const strawberry = get('SELECT id FROM crops WHERE id = 5');
+      if (!strawberry) {
+        run('INSERT INTO crops (id, name, seed_price, sell_price, grow_time, exp_reward, emoji, stage1, stage2, stage3, unlock_level, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [5, '草莓', 250, 600, 240, 180, '🍓', '🌱', '🌿', '🍓', 5, '香甜可口的高级水果，深受喜爱']);
+      }
+      const blueberry = get('SELECT id FROM crops WHERE id = 6');
+      if (!blueberry) {
+        run('INSERT INTO crops (id, name, seed_price, sell_price, grow_time, exp_reward, emoji, stage1, stage2, stage3, unlock_level, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [6, '蓝莓', 400, 900, 300, 250, '🫐', '🌱', '🌿', '🫐', 8, '营养丰富的珍贵浆果，价值很高']);
+      }
+      save();
+    }
   }
 
   const animalProductCount = get('SELECT COUNT(*) as count FROM animal_products').count;
@@ -368,13 +438,21 @@ const init = async () => {
     });
   }
 
+  const userCols = all("PRAGMA table_info(users)");
+  const userColCheck = userCols.find(c => c.name === 'last_login');
+  if (!userColCheck) {
+    console.log('🔧 为用户表添加 last_login 字段...');
+    exec('ALTER TABLE users ADD COLUMN last_login INTEGER');
+    save();
+  }
+
   const userCount = get('SELECT COUNT(*) as count FROM users').count;
   if (userCount === 0) {
     console.log('👤 创建默认玩家...');
     const nowMs = Date.now();
     run(
-      'INSERT INTO users (id, username, coins, level, exp, water, created_at, last_water_update) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [1, '农夫小明', 500, 1, 0, 20, nowMs, nowMs]
+      'INSERT INTO users (id, username, coins, level, exp, water, created_at, last_water_update, last_login) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [1, '农夫小明', 500, 1, 0, 20, nowMs, nowMs, nowMs]
     );
     const userId = 1;
 
@@ -411,6 +489,53 @@ const init = async () => {
       'INSERT INTO animal_pens (user_id, capacity, level) VALUES (?, ?, ?)',
       [1, 2, 1]
     );
+  }
+
+  const fishCount = get('SELECT COUNT(*) as count FROM fish').count;
+  if (fishCount === 0) {
+    console.log('🐟 插入鱼类数据...');
+    const fishes = [
+      [1, '小鲫鱼', '🐟', 'common', 15, 5, 0.3, 1.0, 0.3, '最常见的小鱼，容易上钩'],
+      [2, '鲤鱼', '🐠', 'common', 30, 10, 1.0, 3.0, 0.5, '体型较大的普通鱼类'],
+      [3, '草鱼', '🐡', 'uncommon', 60, 20, 2.0, 5.0, 0.6, '力气很大，需要技巧'],
+      [4, '鲈鱼', '🐟', 'uncommon', 100, 35, 1.5, 4.0, 0.7, '美味的高级食用鱼'],
+      [5, '金龙鱼', '🐉', 'rare', 200, 60, 3.0, 8.0, 0.8, '稀有的金色观赏鱼'],
+      [6, '鲨鱼', '🦈', 'epic', 500, 150, 5.0, 15.0, 0.9, '传说中的海中霸主，极难捕获'],
+      [7, '章鱼', '🐙', 'rare', 150, 45, 1.0, 3.0, 0.75, '聪明的软体动物'],
+      [8, '海龟', '🐢', 'epic', 350, 100, 10.0, 30.0, 0.85, '长寿的神秘海龟'],
+    ];
+    transaction(() => {
+      for (const f of fishes) {
+        run(
+          'INSERT INTO fish (id, name, emoji, rarity, sell_price, exp_reward, weight_min, weight_max, difficulty, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          f
+        );
+      }
+    });
+  }
+
+  const levelRewardCount = get('SELECT COUNT(*) as count FROM level_rewards').count;
+  if (levelRewardCount === 0) {
+    console.log('⭐ 插入等级奖励数据...');
+    const rewards = [
+      [2, 100, '升级到2级奖励'],
+      [3, 200, '升级到3级奖励'],
+      [4, 300, '升级到4级奖励'],
+      [5, 500, '升级到5级奖励，解锁草莓'],
+      [6, 600, '升级到6级奖励'],
+      [7, 800, '升级到7级奖励'],
+      [8, 1000, '升级到8级奖励，解锁蓝莓'],
+      [9, 1200, '升级到9级奖励'],
+      [10, 2000, '升级到10级奖励，里程碑！'],
+    ];
+    transaction(() => {
+      for (const r of rewards) {
+        run(
+          'INSERT INTO level_rewards (level, coin_reward, description) VALUES (?, ?, ?)',
+          r
+        );
+      }
+    });
   }
 
   save();

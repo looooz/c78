@@ -63,3 +63,18 @@ export const collectProcessed = (queueId) =>
 
 export const sellItem = (itemType, itemId, quantity = 1) =>
   api.post('/inventory/sell', { itemType, itemId, quantity })
+
+export const getFish = () =>
+  api.get('/fish')
+
+export const getFishingStatus = () =>
+  api.get('/fishing/status')
+
+export const catchFish = (accuracy) =>
+  api.post('/fishing/catch', { accuracy })
+
+export const getOfflineEarnings = () =>
+  api.get('/offline-earnings')
+
+export const claimOfflineEarnings = () =>
+  api.post('/offline-earnings/claim')

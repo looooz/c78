@@ -87,8 +87,70 @@
 
     <MiniGameDialog
       v-model:visible="gameVisible"
+      :user-coins="user?.coins || 0"
+      :daily-fishing-limit="user?.daily?.fishingLimit || 10"
       @reward="handleGameReward"
     />
+
+    <el-dialog
+      v-model="offlineEarningsVisible"
+      title="📦 离线收益"
+      width="480px"
+      center
+      :close-on-click-modal="false"
+    >
+      <div v-if="offlineEarnings" class="offline-earnings">
+        <div class="offline-time">
+          您离开了 <b>{{ offlineEarnings.offlineText }}</b>
+        </div>
+
+        <div class="earnings-summary">
+          <div class="summary-item coins">
+            <span class="icon">💰</span>
+            <span class="label">金币收益</span>
+            <span class="value">+{{ offlineEarnings.totalCoins }}</span>
+          </div>
+          <div class="summary-item exp">
+            <span class="icon">⭐</span>
+            <span class="label">经验收益</span>
+            <span class="value">+{{ offlineEarnings.totalExp }}</span>
+          </div>
+          <div class="summary-item water" v-if="offlineEarnings.waterRegen > 0">
+            <span class="icon">💧</span>
+            <span class="label">水源恢复</span>
+            <span class="value">+{{ offlineEarnings.waterRegen }}</span>
+          </div>
+        </div>
+
+        <div class="earnings-detail" v-if="offlineEarnings.crops?.harvested?.length > 0">
+          <div class="detail-title">🌾 作物收获</div>
+          <div class="detail-list">
+            <div v-for="c in offlineEarnings.crops.harvested" :key="c.plotIndex" class="detail-item">
+              <span class="item-emoji">{{ c.emoji }}</span>
+              <span class="item-name">{{ c.name }}</span>
+              <span class="item-coin">+{{ c.coins }}💰</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="earnings-detail" v-if="offlineEarnings.products?.collected?.length > 0">
+          <div class="detail-title">🥚 动物产出</div>
+          <div class="detail-list">
+            <div v-for="p in offlineEarnings.products.collected" :key="p.instanceId" class="detail-item">
+              <span class="item-emoji">{{ p.productEmoji }}</span>
+              <span class="item-name">{{ p.productName }} x{{ p.amount }}</span>
+              <span class="item-coin">+{{ p.coins }}💰</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="claim-area">
+          <el-button type="primary" size="large" @click="claimOffline" :loading="claimingOffline">
+            领取奖励
+          </el-button>
+        </div>
+      </div>
+    </el-dialog>
 
     <PlotActionSheet
       v-model:visible="actionVisible"
@@ -132,6 +194,7 @@ import {
   plantCrop, waterPlot, harvestPlot, clearPlot,
   buyFromShop, claimMiniGameReward,
   getAnimals, feedAnimal, collectAnimalProduct, expandPen,
+  getOfflineEarnings, claimOfflineEarnings,
 } from './api.js'
 
 const currentView = ref('farm')
@@ -152,6 +215,9 @@ const seedDialogVisible = ref(false)
 const actionVisible = ref(false)
 const animalActionVisible = ref(false)
 const processingVisible = ref(false)
+const offlineEarningsVisible = ref(false)
+const offlineEarnings = ref(null)
+const claimingOffline = ref(false)
 const selectedPlotIndex = ref(null)
 const selectedPlot = ref(null)
 const selectedAnimal = ref(null)
@@ -317,16 +383,48 @@ const handleGameReward = async (payload) => {
     const res = payload?.data || payload
     ElMessage.success(res.message || '奖励发放成功')
     if (res.levelUp) {
-      ElMessage({ type: 'success', message: `🎉 升级到 Lv.${res.newLevel}！`, duration: 3000 })
+      ElMessage({ type: 'success', message: `🎉 升级到 Lv.${res.newLevel}！奖励 ${res.coinReward || 0} 金币`, duration: 3000 })
     }
-    gameVisible.value = false
     await loadUser()
     await loadInventory()
   } catch (e) { ElMessage.error(e.message) }
 }
 
+const checkOfflineEarnings = async () => {
+  try {
+    const res = await getOfflineEarnings()
+    if (res.available && res.totalCoins + res.totalExp > 0) {
+      offlineEarnings.value = res
+      offlineEarningsVisible.value = true
+    }
+  } catch (e) {
+    console.warn('检查离线收益失败:', e.message)
+  }
+}
+
+const claimOffline = async () => {
+  try {
+    claimingOffline.value = true
+    const res = await claimOfflineEarnings()
+    ElMessage.success(res.message)
+    if (res.levelUp) {
+      ElMessage({ type: 'success', message: `🎉 升级到 Lv.${res.newLevel}！奖励 ${res.coinReward || 0} 金币`, duration: 3000 })
+    }
+    offlineEarningsVisible.value = false
+    offlineEarnings.value = null
+    await refreshAll(false)
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    claimingOffline.value = false
+  }
+}
+
 onMounted(async () => {
   await refreshAll()
+  setTimeout(() => {
+    checkOfflineEarnings()
+  }, 500)
   timer = setInterval(() => {
     loadPlots()
     loadUser()
@@ -416,5 +514,90 @@ onBeforeUnmount(() => {
   font-size: 16px;
   padding: 10px 24px;
   border-radius: 12px;
+}
+
+.offline-earnings {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.offline-time {
+  text-align: center;
+  font-size: 16px;
+  color: #666;
+  padding: 10px;
+  background: linear-gradient(135deg, #fff3e0, #ffe0b2);
+  border-radius: 10px;
+}
+.offline-time b {
+  color: #e65100;
+  font-size: 18px;
+}
+
+.earnings-summary {
+  display: flex;
+  justify-content: space-around;
+  gap: 10px;
+}
+
+.summary-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 14px 10px;
+  border-radius: 12px;
+  background: #fafafa;
+}
+.summary-item .icon { font-size: 28px; }
+.summary-item .label { font-size: 13px; color: #888; }
+.summary-item .value {
+  font-size: 20px;
+  font-weight: bold;
+}
+.summary-item.coins .value { color: #f57c00; }
+.summary-item.exp .value { color: #7b1fa2; }
+.summary-item.water .value { color: #1976d2; }
+
+.earnings-detail {
+  background: #fafafa;
+  border-radius: 12px;
+  padding: 12px;
+}
+.detail-title {
+  font-weight: bold;
+  color: #555;
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+.detail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.detail-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #fff;
+  border-radius: 8px;
+  font-size: 14px;
+}
+.item-emoji { font-size: 20px; }
+.item-name { flex: 1; color: #555; }
+.item-coin { color: #f57c00; font-weight: bold; }
+
+.claim-area {
+  text-align: center;
+  margin-top: 8px;
+}
+.claim-area .el-button {
+  padding: 12px 48px;
+  font-size: 16px;
 }
 </style>
