@@ -1,59 +1,164 @@
 <template>
-  <el-dialog v-model="visible" title="🏪 农场商店" width="620px">
+  <el-dialog v-model="visible" title="🏪 农场商店" width="660px" align-center destroy-on-close>
     <div class="shop-header">
       <el-tag type="warning" size="large" effect="dark">
         💰 我的金币: {{ userCoins }}
       </el-tag>
     </div>
-    <div class="shop-grid scrollbar-thin">
-      <div
-        v-for="item in shopItems"
-        :key="item.id"
-        class="shop-card"
-        :class="{ 'can-not-afford': userCoins < item.price }"
-      >
-        <div class="card-top">
-          <span class="emoji">{{ item.emoji }}</span>
-          <div class="text-info">
-            <div class="name">{{ item.name }}种子</div>
-            <div class="meta">
-              <span title="生长时间">⏱ {{ formatTime(item.growTime) }}</span>
-              <span title="售价">💵 {{ item.sellPrice }}</span>
-              <span title="经验">⭐ {{ item.expReward }}</span>
+
+    <el-tabs v-model="activeCategory" class="shop-tabs">
+      <el-tab-pane label="🌱 种子" name="seed">
+        <div class="shop-grid scrollbar-thin">
+          <div
+            v-for="item in seedItems"
+            :key="'s-' + item.id"
+            class="shop-card"
+            :class="{ 'can-not-afford': userCoins < item.price }"
+          >
+            <div class="card-top">
+              <span class="emoji">{{ item.emoji }}</span>
+              <div class="text-info">
+                <div class="name">{{ item.name }}种子</div>
+                <div class="meta">
+                  <span title="生长时间">⏱ {{ formatTime(item.growTime) }}</span>
+                  <span title="售价">💵 {{ item.sellPrice }}</span>
+                  <span title="经验">⭐ {{ item.expReward }}</span>
+                </div>
+                <div class="desc">{{ item.description }}</div>
+              </div>
             </div>
-            <div class="desc">{{ item.description }}</div>
+            <div class="card-bottom">
+              <div class="price-tag">
+                <span class="coin">💰</span>
+                <span class="amount">{{ item.price }}</span>
+              </div>
+              <div class="buy-area">
+                <el-input-number
+                  v-model="quantities['seed-' + item.id]"
+                  :min="1"
+                  :max="99"
+                  size="small"
+                  controls-position="right"
+                  style="width: 100px;"
+                />
+                <el-button
+                  type="success"
+                  :disabled="userCoins < item.price * (quantities['seed-' + item.id] || 1)"
+                  @click="onBuy(item)"
+                >
+                  购买
+                </el-button>
+              </div>
+            </div>
           </div>
         </div>
-        <div class="card-bottom">
-          <div class="price-tag">
-            <span class="coin">💰</span>
-            <span class="amount">{{ item.price }}</span>
-          </div>
-          <div class="buy-area">
-            <el-input-number
-              v-model="quantities[item.id]"
-              :min="1"
-              :max="99"
-              size="small"
-              controls-position="right"
-              style="width: 100px;"
-            />
-            <el-button
-              type="success"
-              :disabled="userCoins < item.price * quantities[item.id]"
-              @click="onBuy(item)"
-            >
-              购买
-            </el-button>
+      </el-tab-pane>
+
+      <el-tab-pane label="🌾 饲料" name="feed">
+        <div class="shop-grid scrollbar-thin">
+          <div
+            v-for="item in feedItems"
+            :key="'f-' + item.id"
+            class="shop-card"
+            :class="{ 'can-not-afford': userCoins < item.price }"
+          >
+            <div class="card-top">
+              <span class="emoji">{{ item.emoji }}</span>
+              <div class="text-info">
+                <div class="name">{{ item.name }}</div>
+                <div class="meta">
+                  <span title="喂养效果">💪 等级 {{ item.feedValue }}</span>
+                </div>
+                <div class="desc">{{ item.description }}</div>
+              </div>
+            </div>
+            <div class="card-bottom">
+              <div class="price-tag">
+                <span class="coin">💰</span>
+                <span class="amount">{{ item.price }}</span>
+              </div>
+              <div class="buy-area">
+                <el-input-number
+                  v-model="quantities['feed-' + item.id]"
+                  :min="1"
+                  :max="99"
+                  size="small"
+                  controls-position="right"
+                  style="width: 100px;"
+                />
+                <el-button
+                  type="success"
+                  :disabled="userCoins < item.price * (quantities['feed-' + item.id] || 1)"
+                  @click="onBuy(item)"
+                >
+                  购买
+                </el-button>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
-    </div>
+      </el-tab-pane>
+
+      <el-tab-pane label="🐾 动物" name="animal">
+        <div class="tip-banner">
+          <el-alert
+            title="💡 购买动物需要动物栏有空闲栏位，动物栏可在牧场页面扩建"
+            type="info"
+            :closable="false"
+            show-icon
+          />
+        </div>
+        <div class="shop-grid scrollbar-thin">
+          <div
+            v-for="item in animalItems"
+            :key="'a-' + item.id"
+            class="shop-card"
+            :class="{ 'can-not-afford': userCoins < item.price }"
+          >
+            <div class="card-top">
+              <span class="emoji">{{ item.emoji }}</span>
+              <div class="text-info">
+                <div class="name">{{ item.name }}</div>
+                <div class="meta">
+                  <span title="喂食间隔">🍖 每{{ item.feedInterval }}s</span>
+                  <span title="产出间隔">⏱ 每{{ item.productInterval }}s</span>
+                  <span title="经验">⭐ {{ item.expReward }}</span>
+                </div>
+                <div class="desc">{{ item.description }}</div>
+              </div>
+            </div>
+            <div class="card-bottom">
+              <div class="price-tag">
+                <span class="coin">💰</span>
+                <span class="amount">{{ item.price }}</span>
+              </div>
+              <div class="buy-area">
+                <el-input-number
+                  v-model="quantities['animal-' + item.id]"
+                  :min="1"
+                  :max="99"
+                  size="small"
+                  controls-position="right"
+                  style="width: 100px;"
+                />
+                <el-button
+                  type="success"
+                  :disabled="userCoins < item.price * (quantities['animal-' + item.id] || 1)"
+                  @click="onBuy(item)"
+                >
+                  购买
+                </el-button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-tab-pane>
+    </el-tabs>
   </el-dialog>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getShop } from '../api.js'
 
@@ -68,8 +173,13 @@ const visible = computed({
   set: v => emit('update:visible', v),
 })
 
+const activeCategory = ref('seed')
 const shopItems = ref([])
 const quantities = reactive({})
+
+const seedItems = computed(() => shopItems.value.filter(i => i.type === 'seed'))
+const feedItems = computed(() => shopItems.value.filter(i => i.type === 'feed'))
+const animalItems = computed(() => shopItems.value.filter(i => i.type === 'animal'))
 
 const formatTime = (s) => {
   if (s >= 60) return `${Math.floor(s / 60)}分${s % 60}秒`
@@ -77,23 +187,29 @@ const formatTime = (s) => {
 }
 
 const onBuy = (item) => {
-  const qty = quantities[item.id] || 1
+  const qty = quantities[item.type + '-' + item.id] || 1
   const cost = item.price * qty
   if (props.userCoins < cost) {
     ElMessage.warning('金币不足')
     return
   }
-  emit('buy', item.id, qty)
+  emit('buy', item.type, item.id, qty)
 }
 
-onMounted(async () => {
+const loadShop = async () => {
   try {
     const items = await getShop()
     shopItems.value = items
-    items.forEach(i => quantities[i.id] = 1)
+    items.forEach(i => {
+      if (quantities[i.type + '-' + i.id] == null) quantities[i.type + '-' + i.id] = 1
+    })
   } catch (e) {
     ElMessage.error(e.message)
   }
+}
+
+watch(() => props.visible, (v) => {
+  if (v) loadShop()
 })
 </script>
 
@@ -105,12 +221,19 @@ onMounted(async () => {
   border-radius: 12px;
   text-align: center;
 }
+.shop-tabs {
+  margin-top: 4px;
+}
+.tip-banner {
+  margin-bottom: 10px;
+}
 .shop-grid {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-height: 520px;
+  max-height: 480px;
   overflow-y: auto;
+  padding: 4px;
 }
 .shop-card {
   border: 2px solid #ebeef5;
@@ -147,6 +270,7 @@ onMounted(async () => {
   font-size: 13px;
   color: #666;
   margin: 4px 0;
+  flex-wrap: wrap;
 }
 .desc {
   font-size: 12px;

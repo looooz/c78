@@ -5,11 +5,45 @@
     </header>
 
     <main class="main-area">
-      <div class="farm-wrapper">
+      <div class="view-switch">
+        <el-radio-group v-model="currentView" size="large" class="view-radio">
+          <el-radio-button value="farm">
+            <el-icon style="margin-right:4px;"><Operation /></el-icon> 🌾 农场
+          </el-radio-button>
+          <el-radio-button value="ranch">
+            <el-icon style="margin-right:4px;"><House /></el-icon> 🐾 牧场
+          </el-radio-button>
+        </el-radio-group>
+      </div>
+
+      <div class="farm-wrapper" v-show="currentView === 'farm'">
         <FarmCanvas
           ref="farmRef"
           :plots="plots"
           @plot-click="onPlotClick"
+        />
+      </div>
+
+      <div class="ranch-wrapper" v-show="currentView === 'ranch'">
+        <div class="ranch-toolbar">
+          <el-tag v-if="penInfo" type="warning" effect="dark" size="large">
+            🏡 动物栏 Lv.{{ penInfo.level }} ({{ penInfo.currentCount || 0 }}/{{ penInfo.capacity }})
+          </el-tag>
+          <el-button
+            type="primary"
+            :loading="expandLoading"
+            @click="onExpandPen"
+          >
+            <el-icon><Plus /></el-icon>
+            扩建 ({{ penInfo?.expandCost || 0 }}💰)
+          </el-button>
+        </div>
+        <AnimalCanvas
+          ref="animalRef"
+          :animals="animals"
+          :pen="penInfo"
+          @animal-click="onAnimalClick"
+          @slot-empty-click="onSlotEmptyClick"
         />
       </div>
     </main>
@@ -20,6 +54,9 @@
       </el-button>
       <el-button type="success" @click="inventoryVisible = true">
         <el-icon><Box /></el-icon> 背包
+      </el-button>
+      <el-button type="danger" @click="processingVisible = true">
+        <el-icon><KnifeFork /></el-icon> 加工工坊
       </el-button>
       <el-button type="primary" @click="gameVisible = true">
         <el-icon><Trophy /></el-icon> 小游戏
@@ -45,6 +82,7 @@
     <InventoryDialog
       v-model:visible="inventoryVisible"
       :inventory="inventory"
+      @refreshed="refreshAll(false)"
     />
 
     <MiniGameDialog
@@ -60,38 +98,63 @@
       @harvest="handleHarvest"
       @clear="handleClear"
     />
+
+    <AnimalActionSheet
+      v-model:visible="animalActionVisible"
+      :animal="selectedAnimal"
+      @feed="handleFeed"
+      @collect="handleAnimalCollect"
+    />
+
+    <ProcessingDialog
+      v-model:visible="processingVisible"
+      @refreshed="refreshAll(false)"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Operation, House, Plus, Goods, Box, KnifeFork, Trophy, Refresh } from '@element-plus/icons-vue'
 import UserPanel from './components/UserPanel.vue'
 import FarmCanvas from './components/FarmCanvas.vue'
+import AnimalCanvas from './components/AnimalCanvas.vue'
 import SeedDialog from './components/SeedDialog.vue'
 import ShopDialog from './components/ShopDialog.vue'
 import InventoryDialog from './components/InventoryDialog.vue'
 import MiniGameDialog from './components/MiniGameDialog.vue'
 import PlotActionSheet from './components/PlotActionSheet.vue'
+import AnimalActionSheet from './components/AnimalActionSheet.vue'
+import ProcessingDialog from './components/ProcessingDialog.vue'
 import {
   getUser, getPlots, getInventory,
   plantCrop, waterPlot, harvestPlot, clearPlot,
   buyFromShop, claimMiniGameReward,
+  getAnimals, feedAnimal, collectAnimalProduct, expandPen,
 } from './api.js'
 
+const currentView = ref('farm')
 const user = ref(null)
 const plots = ref([])
 const inventory = ref([])
+const animals = ref([])
+const penInfo = ref({ capacity: 2, level: 1, currentCount: 0, expandCost: 400 })
 const isRefreshing = ref(false)
+const expandLoading = ref(false)
 
 const farmRef = ref(null)
+const animalRef = ref(null)
 const shopVisible = ref(false)
 const inventoryVisible = ref(false)
 const gameVisible = ref(false)
 const seedDialogVisible = ref(false)
 const actionVisible = ref(false)
+const animalActionVisible = ref(false)
+const processingVisible = ref(false)
 const selectedPlotIndex = ref(null)
 const selectedPlot = ref(null)
+const selectedAnimal = ref(null)
 
 let timer = null
 
@@ -104,10 +167,17 @@ const loadPlots = async () => {
 const loadInventory = async () => {
   try { inventory.value = await getInventory() } catch (e) { ElMessage.error(e.message) }
 }
+const loadAnimals = async () => {
+  try {
+    const res = await getAnimals()
+    animals.value = res.animals
+    penInfo.value = res.pen
+  } catch (e) { ElMessage.error(e.message) }
+}
 const refreshAll = async (showMsg = true) => {
   try {
     isRefreshing.value = true
-    await Promise.all([loadUser(), loadPlots(), loadInventory()])
+    await Promise.all([loadUser(), loadPlots(), loadInventory(), loadAnimals()])
     if (showMsg) {
       ElMessage({
         message: '✅ 农场数据已刷新',
@@ -130,6 +200,42 @@ const onPlotClick = (plot) => {
   } else {
     selectedPlot.value = plot
     actionVisible.value = true
+  }
+}
+
+const onAnimalClick = (animal) => {
+  selectedAnimal.value = animal
+  animalActionVisible.value = true
+}
+
+const onSlotEmptyClick = (slotIndex) => {
+  ElMessage.info(`🏡 栏位 #${slotIndex + 1} 空闲，去商店购买动物放入吧！`)
+  setTimeout(() => { shopVisible.value = true }, 400)
+}
+
+const onExpandPen = async () => {
+  const cost = penInfo.value?.expandCost || 0
+  try {
+    await ElMessageBox.confirm(
+      `扩建动物栏需要 ${cost} 金币，容量将增加1个，确定吗？`,
+      '🏡 扩建动物栏',
+      {
+        confirmButtonText: '确认扩建',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    )
+    expandLoading.value = true
+    const res = await expandPen()
+    ElMessage.success(res.message)
+    await loadUser()
+    await loadAnimals()
+  } catch (e) {
+    if (e !== 'cancel' && e?.message !== 'cancel') {
+      ElMessage.error(e?.message || '操作取消')
+    }
+  } finally {
+    expandLoading.value = false
   }
 }
 
@@ -172,12 +278,37 @@ const handleClear = async () => {
   } catch (e) { ElMessage.error(e.message) }
 }
 
-const handleBuy = async (cropId, quantity) => {
+const handleFeed = async (animal) => {
   try {
-    const res = await buyFromShop(cropId, quantity)
+    const res = await feedAnimal(animal.instanceId, 1)
+    ElMessage.success(res.message)
+    animalActionVisible.value = false
+    await Promise.all([loadInventory(), loadAnimals()])
+  } catch (e) { ElMessage.error(e.message) }
+}
+
+const handleAnimalCollect = async (animal) => {
+  try {
+    const res = await collectAnimalProduct(animal.instanceId)
+    ElMessage.success(res.message)
+    if (res.levelUp) {
+      ElMessage({ type: 'success', message: `🎉 升级到 Lv.${res.newLevel}！`, duration: 3000 })
+    }
+    animalActionVisible.value = false
+    await refreshAll()
+  } catch (e) { ElMessage.error(e.message) }
+}
+
+const handleBuy = async (itemType, itemId, quantity) => {
+  try {
+    const res = await buyFromShop(itemType, itemId, quantity)
     ElMessage.success(res.message)
     await loadUser()
-    await loadInventory()
+    if (itemType === 'animal') {
+      await loadAnimals()
+    } else {
+      await loadInventory()
+    }
   } catch (e) { ElMessage.error(e.message) }
 }
 
@@ -199,6 +330,7 @@ onMounted(async () => {
   timer = setInterval(() => {
     loadPlots()
     loadUser()
+    if (currentView.value === 'ranch') loadAnimals()
   }, 2000)
 })
 onBeforeUnmount(() => {
@@ -223,10 +355,26 @@ onBeforeUnmount(() => {
 .main-area {
   flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  overflow: auto;
+  padding: 16px 20px 20px 20px;
+  gap: 16px;
+}
+.view-switch {
+  margin-top: 4px;
+}
+.view-radio {
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  border-radius: 14px;
   overflow: hidden;
-  padding: 20px;
+  background: rgba(255,255,255,0.9);
+}
+.view-radio :deep(.el-radio-button__inner) {
+  font-size: 16px;
+  font-weight: 600;
+  padding: 12px 28px;
 }
 .farm-wrapper {
   background: rgba(255, 248, 220, 0.3);
@@ -235,6 +383,26 @@ onBeforeUnmount(() => {
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
   backdrop-filter: blur(4px);
 }
+.ranch-wrapper {
+  background: rgba(255, 243, 224, 0.35);
+  border-radius: 24px;
+  padding: 24px 30px 30px 30px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(4px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.ranch-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 8px;
+}
+.ranch-toolbar .el-tag {
+  font-size: 15px;
+  padding: 6px 14px;
+}
 .bottom-bar {
   padding: 14px 24px;
   background: rgba(139, 69, 19, 0.9);
@@ -242,6 +410,7 @@ onBeforeUnmount(() => {
   justify-content: center;
   gap: 16px;
   z-index: 10;
+  flex-wrap: wrap;
 }
 .bottom-bar .el-button {
   font-size: 16px;

@@ -31,8 +31,35 @@ export const harvestPlot = (plotIndex) =>
 export const clearPlot = (plotIndex) =>
   api.post('/clear', { plotIndex })
 
-export const buyFromShop = (cropId, quantity = 1) =>
-  api.post('/shop/buy', { cropId, quantity })
+export const buyFromShop = (itemType, itemId, quantity = 1) =>
+  api.post('/shop/buy', { itemType, itemId, quantity })
 
 export const claimMiniGameReward = (score, difficulty = 'normal') =>
   api.post('/mini-game/reward', { score, difficulty })
+
+export const getAnimals = () =>
+  api.get('/animals-corrected')
+
+export const feedAnimal = (instanceId, feedId = 1) =>
+  api.post('/animal/feed', { instanceId, feedId })
+
+export const collectAnimalProduct = (instanceId) =>
+  api.post('/animal/collect', { instanceId })
+
+export const expandPen = () =>
+  api.post('/animal/pen-expand')
+
+export const getRecipes = () =>
+  api.get('/recipes')
+
+export const getProcessingQueue = () =>
+  api.get('/processing-queue')
+
+export const startProcessing = (recipeId) =>
+  api.post('/process/start', { recipeId })
+
+export const collectProcessed = (queueId) =>
+  api.post('/process/collect', { queueId })
+
+export const sellItem = (itemType, itemId, quantity = 1) =>
+  api.post('/inventory/sell', { itemType, itemId, quantity })

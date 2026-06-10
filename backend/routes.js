@@ -7,8 +7,56 @@ const EXP_PER_LEVEL = 100;
 const DRY_PENALTY = 0.5;
 const WATER_MAX = 20;
 const WATER_REGEN_INTERVAL = 60000;
+const MAX_PROCESSING_QUEUE = 3;
+const PEN_EXPAND_COST = (currentCap) => currentCap * 200;
 
 const expToLevel = (exp) => Math.floor(exp / EXP_PER_LEVEL) + 1;
+
+const addExp = (userId, expAmount) => {
+  const user = db.get('SELECT * FROM users WHERE id = ?', [userId]);
+  const newExp = user.exp + expAmount;
+  const newLevel = expToLevel(newExp);
+  const levelUp = newLevel > user.level;
+  db.run('UPDATE users SET exp = ?, level = ? WHERE id = ?', [newExp, newLevel, userId]);
+  return { newExp, newLevel, levelUp, oldLevel: user.level };
+};
+
+const addInventory = (userId, itemType, itemId, quantity) => {
+  const existing = db.get(
+    'SELECT id FROM inventory WHERE user_id = ? AND item_type = ? AND item_id = ?',
+    [userId, itemType, itemId]
+  );
+  if (existing) {
+    db.run('UPDATE inventory SET quantity = quantity + ? WHERE id = ?', [quantity, existing.id]);
+  } else {
+    db.run(
+      'INSERT INTO inventory (user_id, item_type, item_id, quantity) VALUES (?, ?, ?, ?)',
+      [userId, itemType, itemId, quantity]
+    );
+  }
+};
+
+const removeInventory = (userId, itemType, itemId, quantity) => {
+  const existing = db.get(
+    'SELECT id, quantity FROM inventory WHERE user_id = ? AND item_type = ? AND item_id = ?',
+    [userId, itemType, itemId]
+  );
+  if (!existing || existing.quantity < quantity) return false;
+  if (existing.quantity === quantity) {
+    db.run('DELETE FROM inventory WHERE id = ?', [existing.id]);
+  } else {
+    db.run('UPDATE inventory SET quantity = quantity - ? WHERE id = ?', [quantity, existing.id]);
+  }
+  return true;
+};
+
+const getInventoryQty = (userId, itemType, itemId) => {
+  const row = db.get(
+    'SELECT quantity FROM inventory WHERE user_id = ? AND item_type = ? AND item_id = ?',
+    [userId, itemType, itemId]
+  );
+  return row ? row.quantity : 0;
+};
 
 const checkUser = (req, res, next) => {
   const user = db.get('SELECT * FROM users WHERE id = ?', [DEFAULT_USER_ID]);
@@ -201,33 +249,31 @@ router.post('/harvest', checkUser, (req, res) => {
   if (plot.water_count === 0) yieldBonus = DRY_PENALTY;
   const coinsEarned = Math.floor(plot.sell_price * yieldBonus);
   const expEarned = plot.exp_reward;
+  const cropAmount = yieldBonus >= 1 ? 1 : 1;
 
-  const newExp = req.user.exp + expEarned;
-  const newLevel = expToLevel(newExp);
-  const levelUp = newLevel > req.user.level;
-
+  let levelUpInfo = null;
   let rewardMsg = '';
-  if (levelUp) rewardMsg = `🎉 恭喜升级到 Lv.${newLevel}！`;
 
   db.transaction(() => {
-    db.run(
-      'UPDATE users SET coins = coins + ?, exp = ?, level = ? WHERE id = ?',
-      [coinsEarned, newExp, newLevel, DEFAULT_USER_ID]
-    );
+    db.run('UPDATE users SET coins = coins + ? WHERE id = ?', [coinsEarned, DEFAULT_USER_ID]);
+    levelUpInfo = addExp(DEFAULT_USER_ID, expEarned);
+    addInventory(DEFAULT_USER_ID, 'crop', plot.crop_id, cropAmount);
     db.run(
       'UPDATE plots SET is_harvested = 1 WHERE user_id = ? AND plot_index = ?',
       [DEFAULT_USER_ID, plotIndex]
     );
   });
 
+  if (levelUpInfo.levelUp) rewardMsg = `🎉 恭喜升级到 Lv.${levelUpInfo.newLevel}！`;
+
   res.json({
     success: true,
-    message: `收获成功！获得 ${coinsEarned} 金币，${expEarned} 经验。${rewardMsg}`,
+    message: `收获成功！获得 ${coinsEarned} 金币，${expEarned} 经验，${plot.name}x${cropAmount}。${rewardMsg}`,
     coins: coinsEarned,
     exp: expEarned,
     yieldBonus,
-    levelUp,
-    newLevel,
+    levelUp: levelUpInfo.levelUp,
+    newLevel: levelUpInfo.newLevel,
   });
 });
 
@@ -249,9 +295,56 @@ router.post('/clear', checkUser, (req, res) => {
 
 router.get('/inventory', checkUser, (req, res) => {
   const items = db.all(`
-    SELECT i.*, c.name as item_name, c.emoji, c.seed_price, c.sell_price, c.grow_time, c.exp_reward, c.description
+    SELECT i.*,
+      CASE i.item_type
+        WHEN 'seed' THEN c.name
+        WHEN 'crop' THEN c.name
+        WHEN 'feed' THEN f.name
+        WHEN 'animal_product' THEN ap.name
+        WHEN 'processed_product' THEN pp.name
+        ELSE '未知'
+      END as item_name,
+      CASE i.item_type
+        WHEN 'seed' THEN c.emoji
+        WHEN 'crop' THEN c.emoji
+        WHEN 'feed' THEN f.emoji
+        WHEN 'animal_product' THEN ap.emoji
+        WHEN 'processed_product' THEN pp.emoji
+        ELSE '📦'
+      END as emoji,
+      CASE i.item_type
+        WHEN 'seed' THEN c.seed_price
+        ELSE NULL
+      END as seed_price,
+      CASE i.item_type
+        WHEN 'seed' THEN c.sell_price
+        WHEN 'crop' THEN c.sell_price
+        WHEN 'animal_product' THEN ap.sell_price
+        WHEN 'processed_product' THEN pp.sell_price
+        WHEN 'feed' THEN f.price
+        ELSE NULL
+      END as sell_price,
+      CASE i.item_type
+        WHEN 'seed' THEN c.grow_time
+        ELSE NULL
+      END as grow_time,
+      CASE i.item_type
+        WHEN 'seed' THEN c.exp_reward
+        ELSE NULL
+      END as exp_reward,
+      CASE i.item_type
+        WHEN 'seed' THEN c.description
+        WHEN 'crop' THEN c.description
+        WHEN 'feed' THEN f.description
+        WHEN 'animal_product' THEN ap.description
+        WHEN 'processed_product' THEN pp.description
+        ELSE NULL
+      END as description
     FROM inventory i
-    LEFT JOIN crops c ON i.item_id = c.id AND i.item_type = 'seed'
+    LEFT JOIN crops c ON ((i.item_type = 'seed' OR i.item_type = 'crop') AND i.item_id = c.id)
+    LEFT JOIN feeds f ON (i.item_type = 'feed' AND i.item_id = f.id)
+    LEFT JOIN animal_products ap ON (i.item_type = 'animal_product' AND i.item_id = ap.id)
+    LEFT JOIN processed_products pp ON (i.item_type = 'processed_product' AND i.item_id = pp.id)
     WHERE i.user_id = ? AND i.quantity > 0
   `, [DEFAULT_USER_ID]);
 
@@ -271,8 +364,7 @@ router.get('/inventory', checkUser, (req, res) => {
 });
 
 router.get('/shop', checkUser, (req, res) => {
-  const items = db.all('SELECT * FROM crops ORDER BY id');
-  res.json(items.map(c => ({
+  const seeds = db.all('SELECT * FROM crops ORDER BY id').map(c => ({
     id: c.id,
     type: 'seed',
     name: c.name,
@@ -282,44 +374,618 @@ router.get('/shop', checkUser, (req, res) => {
     sellPrice: c.sell_price,
     expReward: c.exp_reward,
     description: c.description,
-  })));
+    category: '种子',
+  }));
+
+  const feeds = db.all('SELECT * FROM feeds ORDER BY id').map(f => ({
+    id: f.id,
+    type: 'feed',
+    name: f.name,
+    emoji: f.emoji,
+    price: f.price,
+    feedValue: f.feed_value,
+    description: f.description,
+    category: '饲料',
+  }));
+
+  const animals = db.all('SELECT * FROM animals ORDER BY id').map(a => ({
+    id: a.id,
+    type: 'animal',
+    name: a.name,
+    emoji: a.emoji,
+    price: a.buy_price,
+    feedInterval: a.feed_interval,
+    productInterval: a.product_interval,
+    productAmount: a.product_amount,
+    expReward: a.exp_reward,
+    description: a.description,
+    category: '动物',
+  }));
+
+  res.json([...seeds, ...feeds, ...animals]);
 });
 
 router.post('/shop/buy', checkUser, (req, res) => {
-  const { cropId, quantity = 1 } = req.body;
-  if (!cropId || quantity < 1) return res.status(400).json({ error: '参数错误' });
+  const { itemType, itemId, quantity = 1 } = req.body;
+  if (!itemType || !itemId || quantity < 1) return res.status(400).json({ error: '参数错误' });
 
-  const crop = db.get('SELECT * FROM crops WHERE id = ?', [cropId]);
-  if (!crop) return res.status(404).json({ error: '商品不存在' });
+  let item = null;
+  if (itemType === 'seed') {
+    item = db.get('SELECT * FROM crops WHERE id = ?', [itemId]);
+    if (!item) return res.status(404).json({ error: '商品不存在' });
+    item.price = item.seed_price;
+  } else if (itemType === 'feed') {
+    item = db.get('SELECT * FROM feeds WHERE id = ?', [itemId]);
+    if (!item) return res.status(404).json({ error: '商品不存在' });
+  } else if (itemType === 'animal') {
+    item = db.get('SELECT * FROM animals WHERE id = ?', [itemId]);
+    if (!item) return res.status(404).json({ error: '商品不存在' });
+    item.price = item.buy_price;
+  } else {
+    return res.status(400).json({ error: '未知商品类型' });
+  }
 
-  const totalCost = crop.seed_price * quantity;
+  const totalCost = item.price * quantity;
   if (req.user.coins < totalCost) return res.status(400).json({ error: '金币不足' });
 
-  db.transaction(() => {
-    db.run('UPDATE users SET coins = coins - ? WHERE id = ?', [totalCost, DEFAULT_USER_ID]);
-    const existing = db.get(
-      'SELECT id FROM inventory WHERE user_id = ? AND item_type = ? AND item_id = ?',
-      [DEFAULT_USER_ID, 'seed', cropId]
-    );
-    if (existing) {
-      db.run(
-        'UPDATE inventory SET quantity = quantity + ? WHERE id = ?',
-        [quantity, existing.id]
-      );
-    } else {
-      db.run(
-        'INSERT INTO inventory (user_id, item_type, item_id, quantity) VALUES (?, ?, ?, ?)',
-        [DEFAULT_USER_ID, 'seed', cropId, quantity]
-      );
+  if (itemType === 'animal') {
+    const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [DEFAULT_USER_ID]);
+    const count = db.get('SELECT COUNT(*) as c FROM user_animals WHERE user_id = ?', [DEFAULT_USER_ID]).c;
+    if (count + quantity > pen.capacity) {
+      return res.status(400).json({ error: `动物栏容量不足！当前${count}/${pen.capacity}，请扩建动物栏` });
     }
+
+    const nowMs = Date.now();
+    db.transaction(() => {
+      db.run('UPDATE users SET coins = coins - ? WHERE id = ?', [totalCost, DEFAULT_USER_ID]);
+      for (let i = 0; i < quantity; i++) {
+        const usedSlots = db.all('SELECT pen_slot FROM user_animals WHERE user_id = ?', [DEFAULT_USER_ID]).map(r => r.pen_slot);
+        let slot = 0;
+        while (usedSlots.includes(slot)) slot++;
+        db.run(
+          'INSERT INTO user_animals (user_id, animal_id, pen_slot, bought_at, last_fed_at, last_product_at, hunger, is_sick) VALUES (?, ?, ?, ?, ?, ?, 0, 0)',
+          [DEFAULT_USER_ID, itemId, slot, nowMs, nowMs, nowMs]
+        );
+      }
+    });
+  } else {
+    db.transaction(() => {
+      db.run('UPDATE users SET coins = coins - ? WHERE id = ?', [totalCost, DEFAULT_USER_ID]);
+      addInventory(DEFAULT_USER_ID, itemType, itemId, quantity);
+    });
+  }
+
+  const user = db.get('SELECT coins FROM users WHERE id = ?', [DEFAULT_USER_ID]);
+  res.json({
+    success: true,
+    message: `购买成功！获得 ${quantity} 个${item.name}${itemType === 'animal' ? '，已放入动物栏' : ''}`,
+    coins: user.coins,
+    quantity,
+  });
+});
+
+router.get('/animals', checkUser, (req, res) => {
+  const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [DEFAULT_USER_ID]);
+  const animals = db.all(`
+    SELECT ua.*, a.name, a.emoji, a.baby_emoji, a.feed_interval, a.product_interval, a.product_amount,
+           a.product_id, a.exp_reward, a.description, ap.name as product_name, ap.emoji as product_emoji, ap.sell_price as product_price
+    FROM user_animals ua
+    JOIN animals a ON ua.animal_id = a.id
+    LEFT JOIN animal_products ap ON a.product_id = ap.id
+    WHERE ua.user_id = ?
+    ORDER BY ua.pen_slot
+  `, [DEFAULT_USER_ID]);
+
+  const now = Date.now();
+  const result = animals.map(a => {
+    const boughtAt = a.bought_at || now;
+    const ageHours = (now - boughtAt) / (1000 * 60 * 60);
+    const isBaby = ageHours < 0.5;
+
+    const lastFed = a.last_fed_at || now;
+    const feedIntervalMs = a.feed_interval * 1000;
+    const feedElapsed = now - lastFed;
+    const needFeed = feedElapsed >= feedIntervalMs;
+    const feedRemaining = Math.max(0, Math.ceil((feedIntervalMs - feedElapsed) / 1000));
+    const hungerLevel = Math.min(100, Math.floor((feedElapsed / feedIntervalMs) * 100));
+
+    const lastProd = a.last_product_at || now;
+    const prodIntervalMs = a.product_interval * 1000;
+    const prodElapsed = now - lastProd;
+    const canCollect = prodElapsed >= prodIntervalMs && hungerLevel < 100;
+    const prodRemaining = Math.max(0, Math.ceil((prodIntervalMs - prodElapsed) / 1000));
+    const prodProgress = Math.min(100, Math.floor((prodElapsed / prodIntervalMs) * 100));
+
+    const displayEmoji = isBaby ? a.baby_emoji : a.emoji;
+    const efficiency = hungerLevel >= 100 ? 0 : hungerLevel >= 60 ? 0.5 : 1;
+
+    return {
+      id: ua => ua.id(a),
+      instanceId: a.id,
+      animalId: a.animal_id,
+      name: a.name,
+      emoji: displayEmoji,
+      slot: a.pen_slot,
+      isBaby,
+      needFeed,
+      feedRemaining,
+      hungerLevel,
+      canCollect: canCollect && !isBaby,
+      prodRemaining,
+      prodProgress,
+      productId: a.product_id,
+      productName: a.product_name,
+      productEmoji: a.product_emoji,
+      productPrice: a.product_price,
+      productAmount: a.product_amount,
+      efficiency,
+      isSick: !!a.is_sick,
+      expReward: a.exp_reward,
+      description: a.description,
+    };
+  });
+
+  res.json({
+    pen: {
+      capacity: pen.capacity,
+      level: pen.level,
+      currentCount: animals.length,
+      expandCost: PEN_EXPAND_COST(pen.capacity),
+    },
+    animals: result,
+  });
+});
+
+const uaId = (a) => a.id;
+
+router.get('/animals/list-fix', checkUser, (req, res) => {
+  const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [DEFAULT_USER_ID]);
+  const animalRows = db.all(`
+    SELECT ua.*, a.name, a.emoji, a.baby_emoji, a.feed_interval, a.product_interval, a.product_amount,
+           a.product_id, a.exp_reward, a.description, ap.name as product_name, ap.emoji as product_emoji, ap.sell_price as product_price
+    FROM user_animals ua
+    JOIN animals a ON ua.animal_id = a.id
+    LEFT JOIN animal_products ap ON a.product_id = ap.id
+    WHERE ua.user_id = ?
+    ORDER BY ua.pen_slot
+  `, [DEFAULT_USER_ID]);
+
+  const now = Date.now();
+  const result = animalRows.map(a => {
+    const boughtAt = a.bought_at || now;
+    const ageHours = (now - boughtAt) / (1000 * 60 * 60);
+    const isBaby = ageHours < 0.5;
+
+    const lastFed = a.last_fed_at || now;
+    const feedIntervalMs = a.feed_interval * 1000;
+    const feedElapsed = now - lastFed;
+    const needFeed = feedElapsed >= feedIntervalMs;
+    const feedRemaining = Math.max(0, Math.ceil((feedIntervalMs - feedElapsed) / 1000));
+    const hungerLevel = Math.min(100, Math.floor((feedElapsed / feedIntervalMs) * 100));
+
+    const lastProd = a.last_product_at || now;
+    const prodIntervalMs = a.product_interval * 1000;
+    const prodElapsed = now - lastProd;
+    const canCollect = prodElapsed >= prodIntervalMs && hungerLevel < 100;
+    const prodRemaining = Math.max(0, Math.ceil((prodIntervalMs - prodElapsed) / 1000));
+    const prodProgress = Math.min(100, Math.floor((prodElapsed / prodIntervalMs) * 100));
+
+    const displayEmoji = isBaby ? a.baby_emoji : a.emoji;
+    const efficiency = hungerLevel >= 100 ? 0 : hungerLevel >= 60 ? 0.5 : 1;
+
+    return {
+      instanceId: a.id,
+      animalId: a.animal_id,
+      name: a.name,
+      emoji: displayEmoji,
+      slot: a.pen_slot,
+      isBaby,
+      needFeed,
+      feedRemaining,
+      hungerLevel,
+      canCollect: canCollect && !isBaby,
+      prodRemaining,
+      prodProgress,
+      productId: a.product_id,
+      productName: a.product_name,
+      productEmoji: a.product_emoji,
+      productPrice: a.product_price,
+      productAmount: a.product_amount,
+      efficiency,
+      isSick: !!a.is_sick,
+      expReward: a.exp_reward,
+      description: a.description,
+    };
+  });
+
+  res.json({
+    pen: {
+      capacity: pen.capacity,
+      level: pen.level,
+      currentCount: animalRows.length,
+      expandCost: PEN_EXPAND_COST(pen.capacity),
+    },
+    animals: result,
+  });
+});
+
+router.post('/animal/feed', checkUser, (req, res) => {
+  const { instanceId, feedId = 1 } = req.body;
+  if (!instanceId) return res.status(400).json({ error: '缺少参数' });
+
+  const ua = db.get('SELECT * FROM user_animals WHERE id = ? AND user_id = ?', [instanceId, DEFAULT_USER_ID]);
+  if (!ua) return res.status(404).json({ error: '动物不存在' });
+
+  const animal = db.get('SELECT * FROM animals WHERE id = ?', [ua.animal_id]);
+  if (!animal) return res.status(404).json({ error: '动物种类不存在' });
+
+  const feed = db.get('SELECT * FROM feeds WHERE id = ?', [feedId]);
+  if (!feed) return res.status(404).json({ error: '饲料不存在' });
+
+  const feedQty = getInventoryQty(DEFAULT_USER_ID, 'feed', feedId);
+  const needQty = animal.feed_cost;
+  if (feedQty < needQty) return res.status(400).json({ error: `${feed.name}不足，需要${needQty}个` });
+
+  const now = Date.now();
+  db.transaction(() => {
+    removeInventory(DEFAULT_USER_ID, 'feed', feedId, needQty);
+    db.run(
+      'UPDATE user_animals SET last_fed_at = ?, hunger = 0 WHERE id = ?',
+      [now, instanceId]
+    );
+  });
+
+  res.json({
+    success: true,
+    message: `已用${feed.name}喂食${animal.name}！动物状态良好`,
+    feedUsed: needQty,
+  });
+});
+
+router.post('/animal/collect', checkUser, (req, res) => {
+  const { instanceId } = req.body;
+  if (!instanceId) return res.status(400).json({ error: '缺少参数' });
+
+  const ua = db.get('SELECT * FROM user_animals WHERE id = ? AND user_id = ?', [instanceId, DEFAULT_USER_ID]);
+  if (!ua) return res.status(404).json({ error: '动物不存在' });
+
+  const now = Date.now();
+  const animal = db.get(`
+    SELECT a.*, ap.name as product_name, ap.emoji as product_emoji, ap.sell_price as product_price
+    FROM animals a
+    LEFT JOIN animal_products ap ON a.product_id = ap.id
+    WHERE a.id = ?
+  `, [ua.animal_id]);
+
+  const lastProd = ua.last_product_at || ua.bought_at || now;
+  const prodIntervalMs = animal.product_interval * 1000;
+  if (now - lastProd < prodIntervalMs) {
+    return res.status(400).json({
+      error: `产品尚未就绪，还需${Math.ceil((prodIntervalMs - (now - lastProd)) / 1000)}秒`,
+    });
+  }
+
+  const lastFed = ua.last_fed_at || ua.bought_at || now;
+  const feedIntervalMs = animal.feed_interval * 1000;
+  const hungerLevel = Math.min(100, Math.floor(((now - lastFed) / feedIntervalMs) * 100));
+  if (hungerLevel >= 100) {
+    return res.status(400).json({ error: '动物饥饿，请先喂食再收集产品' });
+  }
+
+  const efficiency = hungerLevel >= 60 ? 0.5 : 1;
+  const amount = Math.max(1, Math.floor(animal.product_amount * efficiency));
+  const expEarned = animal.exp_reward;
+
+  let levelUpInfo = null;
+  db.transaction(() => {
+    addInventory(DEFAULT_USER_ID, 'animal_product', animal.product_id, amount);
+    levelUpInfo = addExp(DEFAULT_USER_ID, expEarned);
+    db.run(
+      'UPDATE user_animals SET last_product_at = ? WHERE id = ?',
+      [now, instanceId]
+    );
+  });
+
+  let msg = `收集成功！获得 ${animal.product_emoji}${animal.product_name} x${amount}，${expEarned} 经验`;
+  if (levelUpInfo.levelUp) msg += ` 🎉 升级到 Lv.${levelUpInfo.newLevel}！`;
+
+  res.json({
+    success: true,
+    message: msg,
+    product: {
+      id: animal.product_id,
+      name: animal.product_name,
+      emoji: animal.product_emoji,
+      amount,
+    },
+    exp: expEarned,
+    levelUp: levelUpInfo.levelUp,
+    newLevel: levelUpInfo.newLevel,
+  });
+});
+
+router.post('/animal/pen-expand', checkUser, (req, res) => {
+  const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [DEFAULT_USER_ID]);
+  const cost = PEN_EXPAND_COST(pen.capacity);
+
+  if (req.user.coins < cost) return res.status(400).json({ error: `金币不足，需要${cost}金币` });
+
+  db.transaction(() => {
+    db.run('UPDATE users SET coins = coins - ? WHERE id = ?', [cost, DEFAULT_USER_ID]);
+    db.run(
+      'UPDATE animal_pens SET capacity = capacity + 1, level = level + 1 WHERE user_id = ?',
+      [DEFAULT_USER_ID]
+    );
+  });
+
+  const newPen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [DEFAULT_USER_ID]);
+  const user = db.get('SELECT coins FROM users WHERE id = ?', [DEFAULT_USER_ID]);
+  res.json({
+    success: true,
+    message: `动物栏扩建成功！容量提升到 ${newPen.capacity}`,
+    capacity: newPen.capacity,
+    level: newPen.level,
+    nextExpandCost: PEN_EXPAND_COST(newPen.capacity),
+    coins: user.coins,
+  });
+});
+
+router.get('/recipes', checkUser, (req, res) => {
+  const recipes = db.all('SELECT * FROM recipes ORDER BY id');
+  const result = recipes.map(r => {
+    const ingredients = db.all(`
+      SELECT ri.*,
+        CASE ri.ingredient_type
+          WHEN 'crop' THEN c.name
+          WHEN 'animal_product' THEN ap.name
+          ELSE '未知'
+        END as ing_name,
+        CASE ri.ingredient_type
+          WHEN 'crop' THEN c.emoji
+          WHEN 'animal_product' THEN ap.emoji
+          ELSE '📦'
+        END as ing_emoji
+      FROM recipe_ingredients ri
+      LEFT JOIN crops c ON (ri.ingredient_type = 'crop' AND ri.ingredient_id = c.id)
+      LEFT JOIN animal_products ap ON (ri.ingredient_type = 'animal_product' AND ri.ingredient_id = ap.id)
+      WHERE ri.recipe_id = ?
+    `, [r.id]);
+
+    const output = db.get('SELECT * FROM processed_products WHERE id = ?', [r.output_product_id]);
+
+    const ingWithAvail = ingredients.map(ing => {
+      const qty = getInventoryQty(DEFAULT_USER_ID, ing.ingredient_type, ing.ingredient_id);
+      return {
+        type: ing.ingredient_type,
+        id: ing.ingredient_id,
+        name: ing.ing_name,
+        emoji: ing.ing_emoji,
+        required: ing.quantity,
+        available: qty,
+        enough: qty >= ing.quantity,
+      };
+    });
+
+    const canMake = ingWithAvail.every(i => i.enough);
+
+    return {
+      id: r.id,
+      name: r.name,
+      emoji: r.emoji,
+      processTime: r.process_time,
+      description: r.description,
+      output: {
+        id: r.output_product_id,
+        name: output.name,
+        emoji: output.emoji,
+        sellPrice: output.sell_price,
+        amount: r.output_amount,
+        description: output.description,
+      },
+      ingredients: ingWithAvail,
+      canMake,
+    };
+  });
+
+  const queueCount = db.get(
+    'SELECT COUNT(*) as c FROM processing_queue WHERE user_id = ? AND is_collected = 0',
+    [DEFAULT_USER_ID]
+  ).c;
+
+  res.json({
+    recipes: result,
+    queueCount,
+    maxQueue: MAX_PROCESSING_QUEUE,
+    queueFull: queueCount >= MAX_PROCESSING_QUEUE,
+  });
+});
+
+router.get('/processing-queue', checkUser, (req, res) => {
+  const rows = db.all(`
+    SELECT pq.*, r.name as recipe_name, r.emoji, r.process_time,
+           pp.name as output_name, pp.emoji as output_emoji, pp.sell_price, r.output_amount
+    FROM processing_queue pq
+    JOIN recipes r ON pq.recipe_id = r.id
+    JOIN processed_products pp ON r.output_product_id = pp.id
+    WHERE pq.user_id = ? AND pq.is_collected = 0
+    ORDER BY pq.started_at
+  `, [DEFAULT_USER_ID]);
+
+  const now = Date.now();
+  const result = rows.map(q => {
+    const totalMs = q.process_time * 1000;
+    const elapsed = now - q.started_at;
+    const progress = Math.min(100, Math.floor((elapsed / totalMs) * 100));
+    const remaining = Math.max(0, Math.ceil((q.finish_at - now) / 1000));
+    const isCompleted = now >= q.finish_at || q.is_completed;
+
+    return {
+      id: q.id,
+      recipeId: q.recipe_id,
+      recipeName: q.recipe_name,
+      emoji: q.emoji,
+      progress,
+      remaining,
+      isCompleted,
+      output: {
+        name: q.output_name,
+        emoji: q.output_emoji,
+        amount: q.output_amount,
+        sellPrice: q.sell_price,
+      },
+    };
+  });
+
+  res.json({
+    queue: result,
+    count: result.length,
+    maxQueue: MAX_PROCESSING_QUEUE,
+    canAdd: result.length < MAX_PROCESSING_QUEUE,
+  });
+});
+
+router.post('/process/start', checkUser, (req, res) => {
+  const { recipeId } = req.body;
+  if (!recipeId) return res.status(400).json({ error: '缺少参数' });
+
+  const queueCount = db.get(
+    'SELECT COUNT(*) as c FROM processing_queue WHERE user_id = ? AND is_collected = 0',
+    [DEFAULT_USER_ID]
+  ).c;
+  if (queueCount >= MAX_PROCESSING_QUEUE) {
+    return res.status(400).json({ error: `生产队列已满（${queueCount}/${MAX_PROCESSING_QUEUE}），请等待完成` });
+  }
+
+  const recipe = db.get('SELECT * FROM recipes WHERE id = ?', [recipeId]);
+  if (!recipe) return res.status(404).json({ error: '配方不存在' });
+
+  const ingredients = db.all('SELECT * FROM recipe_ingredients WHERE recipe_id = ?', [recipeId]);
+  for (const ing of ingredients) {
+    const qty = getInventoryQty(DEFAULT_USER_ID, ing.ingredient_type, ing.ingredient_id);
+    if (qty < ing.quantity) {
+      return res.status(400).json({ error: `原料不足` });
+    }
+  }
+
+  const now = Date.now();
+  const finishAt = now + recipe.process_time * 1000;
+  db.transaction(() => {
+    for (const ing of ingredients) {
+      removeInventory(DEFAULT_USER_ID, ing.ingredient_type, ing.ingredient_id, ing.quantity);
+    }
+    db.run(
+      'INSERT INTO processing_queue (user_id, recipe_id, started_at, finish_at, is_completed, is_collected) VALUES (?, ?, ?, ?, 0, 0)',
+      [DEFAULT_USER_ID, recipeId, now, finishAt]
+    );
+  });
+
+  const newQueueCount = db.get(
+    'SELECT COUNT(*) as c FROM processing_queue WHERE user_id = ? AND is_collected = 0',
+    [DEFAULT_USER_ID]
+  ).c;
+
+  res.json({
+    success: true,
+    message: `开始加工 ${recipe.name}！预计${recipe.process_time}秒后完成`,
+    recipe: {
+      id: recipe.id,
+      name: recipe.name,
+      processTime: recipe.process_time,
+      finishAt,
+    },
+    queueCount: newQueueCount,
+    maxQueue: MAX_PROCESSING_QUEUE,
+  });
+});
+
+router.post('/process/collect', checkUser, (req, res) => {
+  const { queueId } = req.body;
+  if (!queueId) return res.status(400).json({ error: '缺少参数' });
+
+  const q = db.get(`
+    SELECT pq.*, r.name as recipe_name, r.output_product_id, r.output_amount, r.process_time,
+           pp.name as product_name, pp.emoji as product_emoji, pp.sell_price
+    FROM processing_queue pq
+    JOIN recipes r ON pq.recipe_id = r.id
+    JOIN processed_products pp ON r.output_product_id = pp.id
+    WHERE pq.id = ? AND pq.user_id = ?
+  `, [queueId, DEFAULT_USER_ID]);
+
+  if (!q) return res.status(404).json({ error: '加工任务不存在' });
+  if (q.is_collected) return res.status(400).json({ error: '已收取过成品' });
+
+  const now = Date.now();
+  if (now < q.finish_at && !q.is_completed) {
+    return res.status(400).json({
+      error: `加工尚未完成，还需${Math.ceil((q.finish_at - now) / 1000)}秒`,
+    });
+  }
+
+  db.transaction(() => {
+    addInventory(DEFAULT_USER_ID, 'processed_product', q.output_product_id, q.output_amount);
+    db.run(
+      'UPDATE processing_queue SET is_completed = 1, is_collected = 1 WHERE id = ?',
+      [queueId]
+    );
+  });
+
+  res.json({
+    success: true,
+    message: `收取成功！获得 ${q.product_emoji}${q.product_name} x${q.output_amount}`,
+    product: {
+      id: q.output_product_id,
+      name: q.product_name,
+      emoji: q.product_emoji,
+      amount: q.output_amount,
+      sellPrice: q.sell_price,
+    },
+  });
+});
+
+router.post('/inventory/sell', checkUser, (req, res) => {
+  const { itemType, itemId, quantity = 1 } = req.body;
+  if (!itemType || !itemId || quantity < 1) return res.status(400).json({ error: '参数错误' });
+
+  let sellPrice = 0;
+  let itemName = '';
+
+  if (itemType === 'crop') {
+    const crop = db.get('SELECT * FROM crops WHERE id = ?', [itemId]);
+    if (!crop) return res.status(404).json({ error: '物品不存在' });
+    sellPrice = crop.sell_price;
+    itemName = crop.name;
+  } else if (itemType === 'animal_product') {
+    const ap = db.get('SELECT * FROM animal_products WHERE id = ?', [itemId]);
+    if (!ap) return res.status(404).json({ error: '物品不存在' });
+    sellPrice = ap.sell_price;
+    itemName = ap.name;
+  } else if (itemType === 'processed_product') {
+    const pp = db.get('SELECT * FROM processed_products WHERE id = ?', [itemId]);
+    if (!pp) return res.status(404).json({ error: '物品不存在' });
+    sellPrice = pp.sell_price;
+    itemName = pp.name;
+  } else {
+    return res.status(400).json({ error: '该物品类型不可出售' });
+  }
+
+  const curQty = getInventoryQty(DEFAULT_USER_ID, itemType, itemId);
+  const sellQty = Math.min(quantity, curQty);
+  if (sellQty <= 0) return res.status(400).json({ error: '库存不足' });
+
+  const totalCoins = sellPrice * sellQty;
+
+  db.transaction(() => {
+    removeInventory(DEFAULT_USER_ID, itemType, itemId, sellQty);
+    db.run('UPDATE users SET coins = coins + ? WHERE id = ?', [totalCoins, DEFAULT_USER_ID]);
   });
 
   const user = db.get('SELECT coins FROM users WHERE id = ?', [DEFAULT_USER_ID]);
   res.json({
     success: true,
-    message: `购买成功！获得 ${quantity} 个${crop.name}种子`,
-    coins: user.coins,
-    quantity,
+    message: `出售成功！${itemName} x${sellQty}，获得 ${totalCoins} 金币`,
+    coins: totalCoins,
+    totalCoins: user.coins,
+    soldQty: sellQty,
   });
 });
 
@@ -357,9 +1023,7 @@ router.post('/mini-game/reward', checkUser, (req, res) => {
     }
   }
 
-  const newExp = req.user.exp + exp;
-  const newLevel = expToLevel(newExp);
-  const levelUp = newLevel > req.user.level;
+  const levelUpInfo = addExp(DEFAULT_USER_ID, exp);
   const totalCoins = coins + bonusCoins;
 
   let msgParts = [];
@@ -368,23 +1032,9 @@ router.post('/mini-game/reward', checkUser, (req, res) => {
 
   try {
     db.transaction(() => {
-      db.run(
-        'UPDATE users SET coins = coins + ?, exp = ?, level = ? WHERE id = ?',
-        [totalCoins, newExp, newLevel, DEFAULT_USER_ID]
-      );
+      db.run('UPDATE users SET coins = coins + ? WHERE id = ?', [totalCoins, DEFAULT_USER_ID]);
       for (const bi of bonusItems) {
-        const existing = db.get(
-          'SELECT id FROM inventory WHERE user_id = ? AND item_type = ? AND item_id = ?',
-          [DEFAULT_USER_ID, 'seed', bi.id]
-        );
-        if (existing) {
-          db.run('UPDATE inventory SET quantity = quantity + ? WHERE id = ?', [bi.qty, existing.id]);
-        } else {
-          db.run(
-            'INSERT INTO inventory (user_id, item_type, item_id, quantity) VALUES (?, ?, ?, ?)',
-            [DEFAULT_USER_ID, 'seed', bi.id, bi.qty]
-          );
-        }
+        addInventory(DEFAULT_USER_ID, 'seed', bi.id, bi.qty);
       }
     });
   } catch (e) {
@@ -396,7 +1046,7 @@ router.post('/mini-game/reward', checkUser, (req, res) => {
     return crop ? `${crop.emoji}${crop.name}种子 x${b.qty}` : '';
   }).filter(Boolean).join('、');
   if (bonusText) msgParts.push(`🎁 奖励物资：${bonusText}`);
-  if (levelUp) msgParts.push(`🎉 升级到 Lv.${newLevel}！`);
+  if (levelUpInfo.levelUp) msgParts.push(`🎉 升级到 Lv.${levelUpInfo.newLevel}！`);
 
   const user = db.get('SELECT coins FROM users WHERE id = ?', [DEFAULT_USER_ID]);
   res.json({
@@ -406,13 +1056,86 @@ router.post('/mini-game/reward', checkUser, (req, res) => {
     baseCoins: coins,
     bonusCoins,
     exp,
-    levelUp,
-    newLevel,
+    levelUp: levelUpInfo.levelUp,
+    newLevel: levelUpInfo.newLevel,
     bonusItems: bonusItems.map(b => {
       const crop = db.get('SELECT emoji, name FROM crops WHERE id = ?', [b.id]);
       return crop ? { ...b, emoji: crop.emoji, name: crop.name } : b;
     }),
     userCoins: user.coins,
+  });
+});
+
+router.get('/animals-corrected', checkUser, (req, res) => {
+  const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [DEFAULT_USER_ID]);
+  const animalRows = db.all(`
+    SELECT ua.id as instance_id, ua.animal_id, ua.pen_slot, ua.bought_at, ua.last_fed_at, ua.last_product_at, ua.hunger, ua.is_sick,
+           a.name, a.emoji, a.baby_emoji, a.feed_interval, a.product_interval, a.product_amount,
+           a.product_id, a.exp_reward, a.description,
+           ap.name as product_name, ap.emoji as product_emoji, ap.sell_price as product_price
+    FROM user_animals ua
+    JOIN animals a ON ua.animal_id = a.id
+    LEFT JOIN animal_products ap ON a.product_id = ap.id
+    WHERE ua.user_id = ?
+    ORDER BY ua.pen_slot
+  `, [DEFAULT_USER_ID]);
+
+  const now = Date.now();
+  const animals = animalRows.map(a => {
+    const boughtAt = a.bought_at || now;
+    const ageMinutes = (now - boughtAt) / (1000 * 60);
+    const isBaby = ageMinutes < 2;
+
+    const lastFed = a.last_fed_at || now;
+    const feedIntervalMs = a.feed_interval * 1000;
+    const feedElapsed = now - lastFed;
+    const needFeed = feedElapsed >= feedIntervalMs;
+    const feedRemaining = Math.max(0, Math.ceil((feedIntervalMs - feedElapsed) / 1000));
+    const hungerLevel = Math.min(100, Math.floor((feedElapsed / feedIntervalMs) * 100));
+
+    const lastProd = a.last_product_at || now;
+    const prodIntervalMs = a.product_interval * 1000;
+    const prodElapsed = now - lastProd;
+    const canCollect = prodElapsed >= prodIntervalMs && hungerLevel < 100 && !isBaby;
+    const prodRemaining = Math.max(0, Math.ceil((prodIntervalMs - prodElapsed) / 1000));
+    const prodProgress = Math.min(100, Math.floor((prodElapsed / prodIntervalMs) * 100));
+
+    const displayEmoji = isBaby ? a.baby_emoji : a.emoji;
+    const efficiency = hungerLevel >= 100 ? 0 : hungerLevel >= 60 ? 0.5 : 1;
+
+    return {
+      instanceId: a.instance_id,
+      animalId: a.animal_id,
+      name: a.name,
+      emoji: displayEmoji,
+      slot: a.pen_slot,
+      isBaby,
+      needFeed,
+      feedRemaining,
+      hungerLevel,
+      canCollect,
+      prodRemaining,
+      prodProgress,
+      productId: a.product_id,
+      productName: a.product_name,
+      productEmoji: a.product_emoji,
+      productPrice: a.product_price,
+      productAmount: a.product_amount,
+      efficiency,
+      isSick: !!a.is_sick,
+      expReward: a.exp_reward,
+      description: a.description,
+    };
+  });
+
+  res.json({
+    pen: {
+      capacity: pen.capacity,
+      level: pen.level,
+      currentCount: animalRows.length,
+      expandCost: PEN_EXPAND_COST(pen.capacity),
+    },
+    animals,
   });
 });
 
