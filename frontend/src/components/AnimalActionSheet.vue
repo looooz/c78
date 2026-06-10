@@ -2,7 +2,7 @@
   <el-dialog
     v-model="visible"
     :title="title"
-    width="440px"
+    width="460px"
     align-center
     destroy-on-close
     class="animal-action-sheet"
@@ -24,6 +24,11 @@
             </span>
           </div>
           <p class="desc">{{ animal.description }}</p>
+          <div class="feed-level-tip">
+            <el-tag size="small" type="info" effect="plain">
+              📊 饲料等级: 需{{ requiredFeedLevel }}级及以上
+            </el-tag>
+          </div>
         </div>
       </div>
 
@@ -78,6 +83,46 @@
           />
         </div>
       </div>
+
+      <div class="feed-select-section">
+        <div class="section-title">🍽️ 选择饲料</div>
+        <div class="feed-list">
+          <div
+            v-for="feed in feedOptions"
+            :key="feed.id"
+            class="feed-item"
+            :class="{
+              'selected': selectedFeedId === feed.id,
+              'disabled': !feed.canUse,
+              'not-enough': feed.canUse && feed.count < feed.needQty
+            }"
+            @click="feed.canUse && selectFeed(feed.id)"
+          >
+            <div class="feed-icon">{{ feed.emoji }}</div>
+            <div class="feed-info">
+              <div class="feed-name">
+                {{ feed.name }}
+                <el-tag v-if="feed.feedValue >= requiredFeedLevel" size="small" type="success" effect="light">
+                  ✓ 适用
+                </el-tag>
+                <el-tag v-else size="small" type="danger" effect="light">
+                  ✗ 等级不足
+                </el-tag>
+              </div>
+              <div class="feed-meta">
+                <span>等级 {{ feed.feedValue }}</span>
+                <span class="dot">•</span>
+                <span>库存: {{ feed.count }}</span>
+                <span class="dot">•</span>
+                <span>需{{ feed.needQty }}个</span>
+              </div>
+            </div>
+            <div class="feed-check">
+              <el-radio :model-value="selectedFeedId" :label="feed.id" :disabled="!feed.canUse" />
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <template #footer>
@@ -104,13 +149,17 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
   animal: { type: Object, default: null },
+  feeds: { type: Array, default: () => [] },
+  inventory: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['update:visible', 'feed', 'collect'])
+
+const selectedFeedId = ref(null)
 
 const visible = computed({
   get: () => props.visible,
@@ -119,9 +168,38 @@ const visible = computed({
 
 const title = computed(() => props.animal ? `${props.animal.emoji} ${props.animal.name}` : '动物操作')
 
+const requiredFeedLevel = computed(() => {
+  if (!props.animal) return 1
+  return Math.max(1, Math.ceil(props.animal.feedCost / 2))
+})
+
+const feedOptions = computed(() => {
+  const invMap = {}
+  props.inventory.forEach(inv => {
+    if (inv.type === 'feed') {
+      invMap[inv.item_id] = inv.quantity
+    }
+  })
+
+  return props.feeds.map(feed => {
+    const count = invMap[feed.id] || 0
+    const needQty = Math.max(1, Math.ceil((props.animal?.feedCost || 1) / feed.feed_value))
+    const canUse = feed.feed_value >= requiredFeedLevel.value
+    return {
+      ...feed,
+      feedValue: feed.feed_value,
+      count,
+      needQty,
+      canUse,
+    }
+  }).sort((a, b) => a.feedValue - b.feedValue)
+})
+
 const canFeed = computed(() => {
   if (!props.animal) return false
-  return props.animal.needFeed || props.animal.hungerLevel >= 50
+  if (!(props.animal.needFeed || props.animal.hungerLevel >= 50)) return false
+  const validFeed = feedOptions.value.find(f => f.canUse && f.count >= f.needQty)
+  return !!validFeed
 })
 
 const canCollect = computed(() => {
@@ -159,8 +237,19 @@ const hungerColor = computed(() => {
   return '#66BB6A'
 })
 
+watch(() => props.visible, (val) => {
+  if (val) {
+    const defaultFeed = feedOptions.value.find(f => f.canUse && f.count >= f.needQty)
+    selectedFeedId.value = defaultFeed ? defaultFeed.id : null
+  }
+})
+
+const selectFeed = (id) => {
+  selectedFeedId.value = id
+}
+
 const onFeed = () => {
-  emit('feed', props.animal)
+  emit('feed', { animal: props.animal, feedId: selectedFeedId.value })
 }
 const onCollect = () => {
   emit('collect', props.animal)
@@ -225,10 +314,14 @@ const onCollect = () => {
   margin: 0;
   line-height: 1.5;
 }
+.feed-level-tip {
+  margin-top: 8px;
+}
 .progress-section {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  margin-bottom: 16px;
 }
 .progress-item {
   padding: 12px 14px;
@@ -263,6 +356,77 @@ const onCollect = () => {
 .tip-warn { color: #E65100; font-weight: 500; }
 .baby-tip {
   margin-top: 4px;
+}
+.feed-select-section {
+  background: #FFF9F0;
+  border-radius: 12px;
+  padding: 12px 14px;
+  border: 1px solid #FFE0B2;
+}
+.section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #5D4037;
+  margin-bottom: 10px;
+}
+.feed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.feed-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #fff;
+  border-radius: 10px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.feed-item:hover:not(.disabled) {
+  background: #FFF3E0;
+}
+.feed-item.selected {
+  border-color: #FF9800;
+  background: #FFF3E0;
+}
+.feed-item.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.feed-item.not-enough {
+  opacity: 0.7;
+}
+.feed-icon {
+  font-size: 32px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.feed-info {
+  flex: 1;
+  min-width: 0;
+}
+.feed-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #3E2723;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.feed-meta {
+  font-size: 12px;
+  color: #8D6E63;
+  margin-top: 4px;
+}
+.feed-meta .dot {
+  margin: 0 4px;
+  color: #BCAAA4;
+}
+.feed-check {
+  flex-shrink: 0;
 }
 .action-footer {
   display: flex;

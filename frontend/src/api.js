@@ -40,8 +40,11 @@ export const claimMiniGameReward = (score, difficulty = 'normal') =>
 export const getAnimals = () =>
   api.get('/animals-corrected')
 
-export const feedAnimal = (instanceId, feedId = 1) =>
-  api.post('/animal/feed', { instanceId, feedId })
+export const feedAnimal = (instanceId, feedId) => {
+  const data = { instanceId }
+  if (feedId != null) data.feedId = feedId
+  return api.post('/animal/feed', data)
+}
 
 export const collectAnimalProduct = (instanceId) =>
   api.post('/animal/collect', { instanceId })

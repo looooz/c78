@@ -563,7 +563,6 @@ router.get('/animals', checkUser, (req, res) => {
     const efficiency = hungerLevel >= 100 ? 0 : hungerLevel >= 60 ? 0.5 : 1;
 
     return {
-      id: ua => ua.id(a),
       instanceId: a.id,
       animalId: a.animal_id,
       name: a.name,
@@ -673,7 +672,7 @@ router.get('/animals/list-fix', checkUser, (req, res) => {
 });
 
 router.post('/animal/feed', checkUser, (req, res) => {
-  const { instanceId, feedId = 1 } = req.body;
+  const { instanceId, feedId } = req.body;
   if (!instanceId) return res.status(400).json({ error: '缺少参数' });
 
   const ua = db.get('SELECT * FROM user_animals WHERE id = ? AND user_id = ?', [instanceId, DEFAULT_USER_ID]);
@@ -682,16 +681,54 @@ router.post('/animal/feed', checkUser, (req, res) => {
   const animal = db.get('SELECT * FROM animals WHERE id = ?', [ua.animal_id]);
   if (!animal) return res.status(404).json({ error: '动物种类不存在' });
 
-  const feed = db.get('SELECT * FROM feeds WHERE id = ?', [feedId]);
-  if (!feed) return res.status(404).json({ error: '饲料不存在' });
+  const requiredFeedLevel = Math.max(1, Math.ceil(animal.feed_cost / 2));
+  const allFeeds = db.all('SELECT * FROM feeds ORDER BY feed_value ASC');
 
-  const feedQty = getInventoryQty(DEFAULT_USER_ID, 'feed', feedId);
-  const needQty = animal.feed_cost;
-  if (feedQty < needQty) return res.status(400).json({ error: `${feed.name}不足，需要${needQty}个` });
+  let selectedFeed = null;
+  let needQty = 0;
+
+  if (feedId) {
+    const feed = allFeeds.find(f => f.id === parseInt(feedId));
+    if (!feed) return res.status(404).json({ error: '饲料不存在' });
+    if (feed.feed_value < requiredFeedLevel) {
+      return res.status(400).json({
+        error: `${feed.name}等级过低，${animal.name}需要${requiredFeedLevel}级及以上饲料`,
+        requiredLevel: requiredFeedLevel,
+      });
+    }
+    selectedFeed = feed;
+    needQty = Math.max(1, Math.ceil(animal.feed_cost / feed.feed_value));
+  } else {
+    const validFeeds = allFeeds.filter(f => f.feed_value >= requiredFeedLevel);
+    for (const feed of validFeeds) {
+      const qty = Math.max(1, Math.ceil(animal.feed_cost / feed.feed_value));
+      const haveQty = getInventoryQty(DEFAULT_USER_ID, 'feed', feed.id);
+      if (haveQty >= qty) {
+        selectedFeed = feed;
+        needQty = qty;
+        break;
+      }
+    }
+    if (!selectedFeed) {
+      const feedNames = validFeeds.map(f => f.name).join('、');
+      return res.status(400).json({
+        error: `饲料不足，${animal.name}需要${requiredFeedLevel}级及以上饲料（${feedNames}）`,
+        requiredLevel: requiredFeedLevel,
+      });
+    }
+  }
+
+  const haveQty = getInventoryQty(DEFAULT_USER_ID, 'feed', selectedFeed.id);
+  if (haveQty < needQty) {
+    return res.status(400).json({
+      error: `${selectedFeed.name}不足，需要${needQty}个`,
+      requiredLevel: requiredFeedLevel,
+    });
+  }
 
   const now = Date.now();
   db.transaction(() => {
-    removeInventory(DEFAULT_USER_ID, 'feed', feedId, needQty);
+    removeInventory(DEFAULT_USER_ID, 'feed', selectedFeed.id, needQty);
     db.run(
       'UPDATE user_animals SET last_fed_at = ?, hunger = 0 WHERE id = ?',
       [now, instanceId]
@@ -700,8 +737,11 @@ router.post('/animal/feed', checkUser, (req, res) => {
 
   res.json({
     success: true,
-    message: `已用${feed.name}喂食${animal.name}！动物状态良好`,
+    message: `已用${selectedFeed.name}喂食${animal.name}！消耗${needQty}个`,
     feedUsed: needQty,
+    feedId: selectedFeed.id,
+    feedName: selectedFeed.name,
+    requiredLevel: requiredFeedLevel,
   });
 });
 
@@ -1140,7 +1180,7 @@ router.get('/animals-corrected', checkUser, (req, res) => {
   const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [DEFAULT_USER_ID]);
   const animalRows = db.all(`
     SELECT ua.id as instance_id, ua.animal_id, ua.pen_slot, ua.bought_at, ua.last_fed_at, ua.last_product_at, ua.hunger, ua.is_sick,
-           a.name, a.emoji, a.baby_emoji, a.feed_interval, a.product_interval, a.product_amount,
+           a.name, a.emoji, a.baby_emoji, a.feed_cost, a.feed_interval, a.product_interval, a.product_amount,
            a.product_id, a.exp_reward, a.description,
            ap.name as product_name, ap.emoji as product_emoji, ap.sell_price as product_price
     FROM user_animals ua
@@ -1183,6 +1223,7 @@ router.get('/animals-corrected', checkUser, (req, res) => {
       needFeed,
       feedRemaining,
       hungerLevel,
+      feedCost: a.feed_cost,
       canCollect,
       prodRemaining,
       prodProgress,
@@ -1263,9 +1304,13 @@ const pickFishByAccuracy = (accuracy) => {
   const allFish = db.all('SELECT * FROM fish');
   const acc = Math.max(0, Math.min(1, accuracy));
 
+  const rarityWeight = { common: 4, uncommon: 2, rare: 1, epic: 0.4 };
+  const accBonus = Math.pow(acc, 1.5);
+
   const weighted = allFish.map(f => {
     const diffFactor = 1 - Math.abs(f.difficulty - acc);
-    const weight = Math.max(0.1, diffFactor) * (f.rarity === 'common' ? 3 : f.rarity === 'uncommon' ? 2 : f.rarity === 'rare' ? 1 : 0.5);
+    const adjustedDiff = Math.max(0.05, diffFactor * 0.7 + accBonus * 0.5);
+    const weight = adjustedDiff * (rarityWeight[f.rarity] || 1);
     return { fish: f, weight };
   });
 
@@ -1299,7 +1344,27 @@ router.post('/fishing/catch', checkUser, (req, res) => {
   const weight = +(fish.weight_min + Math.random() * (fish.weight_max - fish.weight_min)).toFixed(2);
   const now = Date.now();
 
-  const qualityBonus = acc > 0.8 ? 1.5 : acc > 0.6 ? 1.2 : acc > 0.4 ? 1 : 0.8;
+  let qualityBonus, quality;
+  if (acc >= 0.9) {
+    qualityBonus = 1.5;
+    quality = '完美';
+  } else if (acc >= 0.75) {
+    qualityBonus = 1.2 + (acc - 0.75) / 0.15 * 0.3;
+    quality = '优秀';
+  } else if (acc >= 0.5) {
+    qualityBonus = 0.9 + (acc - 0.5) / 0.25 * 0.3;
+    quality = '良好';
+  } else if (acc >= 0.3) {
+    qualityBonus = 0.7 + (acc - 0.3) / 0.2 * 0.2;
+    quality = '普通';
+  } else if (acc >= 0.15) {
+    qualityBonus = 0.5 + (acc - 0.15) / 0.15 * 0.2;
+    quality = '勉强';
+  } else {
+    qualityBonus = 0.3 + acc / 0.15 * 0.2;
+    quality = '糟糕';
+  }
+  qualityBonus = Math.round(qualityBonus * 100) / 100;
   const sellPrice = Math.floor(fish.sell_price * qualityBonus);
   const expReward = Math.floor(fish.exp_reward * qualityBonus);
 
@@ -1315,7 +1380,6 @@ router.post('/fishing/catch', checkUser, (req, res) => {
     levelUpInfo = addExp(DEFAULT_USER_ID, expReward);
   });
 
-  const quality = acc > 0.8 ? '完美' : acc > 0.6 ? '优秀' : acc > 0.4 ? '普通' : '勉强';
   const rarityText = { common: '普通', uncommon: '稀有', rare: '珍稀', epic: '传说' }[fish.rarity] || '普通';
 
   let msg = `🎣 钓到了 ${fish.emoji}${fish.name}（${rarityText}）！重量 ${weight}kg，品质：${quality}`;

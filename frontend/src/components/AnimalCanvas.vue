@@ -3,6 +3,7 @@
     ref="canvasRef"
     :width="canvasWidth"
     :height="canvasHeight"
+    :style="{ width: cssWidth + 'px' }"
     class="farm-canvas"
     @click="onCanvasClick"
     @mousemove="onCanvasHover"
@@ -10,7 +11,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch, nextTick, computed } from 'vue'
+import { ref, onMounted, watch, nextTick, computed, onBeforeUnmount } from 'vue'
 
 const props = defineProps({
   animals: { type: Array, default: () => [] },
@@ -20,6 +21,7 @@ const emit = defineEmits(['animal-click', 'slot-empty-click', 'expand-click'])
 
 const canvasRef = ref(null)
 const hoveredIndex = ref(-1)
+const dpr = ref(typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1)
 
 const capacity = computed(() => props.pen?.capacity || 2)
 const cols = computed(() => Math.min(3, Math.max(2, Math.ceil(Math.sqrt(capacity.value)))))
@@ -30,8 +32,10 @@ const padding = 30
 const slotW = 200
 const slotH = 200
 
-const canvasWidth = computed(() => cols.value * slotW + (cols.value + 1) * gap + padding * 2)
-const canvasHeight = computed(() => rows.value * slotH + (rows.value + 1) * gap + padding * 2 + 70)
+const cssWidth = computed(() => cols.value * slotW + (cols.value + 1) * gap + padding * 2)
+const cssHeight = computed(() => rows.value * slotH + (rows.value + 1) * gap + padding * 2 + 70)
+const canvasWidth = computed(() => Math.round(cssWidth.value * dpr.value))
+const canvasHeight = computed(() => Math.round(cssHeight.value * dpr.value))
 
 const getSlotRect = (index) => {
   const c = cols.value
@@ -306,7 +310,7 @@ const drawHeader = (ctx) => {
   ctx.font = 'bold 14px sans-serif'
   ctx.fillStyle = 'rgba(255,255,255,0.9)'
   ctx.textAlign = 'right'
-  const textX = canvasWidth.value - 40
+  const textX = cssWidth.value - 40
   ctx.fillText(capText, textX, 40)
 
   ctx.font = '12px sans-serif'
@@ -320,13 +324,15 @@ const render = () => {
   const canvas = canvasRef.value
   if (!canvas) return
   const ctx = canvas.getContext('2d')
-  ctx.clearRect(0, 0, canvasWidth.value, canvasHeight.value)
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.save()
+  ctx.scale(dpr.value, dpr.value)
 
-  const bg = ctx.createLinearGradient(0, 0, 0, canvasHeight.value)
+  const bg = ctx.createLinearGradient(0, 0, 0, cssHeight.value)
   bg.addColorStop(0, 'rgba(255,228,181,0.5)')
   bg.addColorStop(1, 'rgba(210,180,140,0.5)')
   ctx.fillStyle = bg
-  roundRect(ctx, 10, 10, canvasWidth.value - 20, canvasHeight.value - 20, 24)
+  roundRect(ctx, 10, 10, cssWidth.value - 20, cssHeight.value - 20, 24)
   ctx.fill()
 
   drawHeader(ctx)
@@ -339,15 +345,14 @@ const render = () => {
     const isHovered = hoveredIndex.value === i
     drawPenSlot(ctx, i, animal, getSlotRect(i), isHovered)
   }
+  ctx.restore()
 }
 
 const getIndexFromEvent = (e) => {
   const canvas = canvasRef.value
   const rect = canvas.getBoundingClientRect()
-  const scaleX = canvas.width / rect.width
-  const scaleY = canvas.height / rect.height
-  const mx = (e.clientX - rect.left) * scaleX
-  const my = (e.clientY - rect.top) * scaleY
+  const mx = e.clientX - rect.left
+  const my = e.clientY - rect.top
 
   for (let i = 0; i < capacity.value; i++) {
     const r = getSlotRect(i)
@@ -390,8 +395,9 @@ watch(() => [props.animals, props.pen], () => render(), { deep: true })
 .farm-canvas {
   display: block;
   cursor: pointer;
-  max-width: 100%;
+  max-width: none;
   height: auto;
   border-radius: 16px;
+  flex-shrink: 0;
 }
 </style>

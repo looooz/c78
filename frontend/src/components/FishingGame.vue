@@ -282,16 +282,14 @@ const calculateAccuracy = () => {
 
   const distance = Math.abs(pos - spotCenter)
 
-  if (distance <= spotHalfWidth * 0.2) {
-    return 0.9 + Math.random() * 0.1
-  } else if (distance <= spotHalfWidth * 0.5) {
-    return 0.7 + Math.random() * 0.2
-  } else if (distance <= spotHalfWidth) {
-    return 0.5 + Math.random() * 0.2
-  } else if (distance <= spotHalfWidth * 1.5) {
-    return 0.3 + Math.random() * 0.2
+  if (distance <= spotHalfWidth) {
+    const ratio = distance / spotHalfWidth
+    return Math.max(0.4, 1 - 0.6 * ratio * ratio)
   } else {
-    return 0.1 + Math.random() * 0.2
+    const outDistance = distance - spotHalfWidth
+    const outMax = Math.max(spotHalfWidth * 2, 30)
+    const outRatio = Math.min(1, outDistance / outMax)
+    return Math.max(0.05, 0.4 * (1 - outRatio * outRatio))
   }
 }
 
