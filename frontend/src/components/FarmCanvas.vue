@@ -95,7 +95,10 @@ const drawPlot = (ctx, plot, rect, isHovered) => {
   ctx.fillStyle = baseColor
   ctx.fill()
 
+  ctx.shadowColor = 'transparent'
   ctx.shadowBlur = 0
+  ctx.shadowOffsetX = 0
+  ctx.shadowOffsetY = 0
   roundRect(ctx, x, y, w, h - 30, radius)
   ctx.clip()
 

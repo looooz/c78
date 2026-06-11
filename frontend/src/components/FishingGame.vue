@@ -284,12 +284,14 @@ const calculateAccuracy = () => {
 
   if (distance <= spotHalfWidth) {
     const ratio = distance / spotHalfWidth
-    return Math.max(0.4, 1 - 0.6 * ratio * ratio)
+    const accuracy = 1.0 - ratio * 0.55
+    return Math.max(0.45, Math.min(1.0, accuracy))
   } else {
-    const outDistance = distance - spotHalfWidth
-    const outMax = Math.max(spotHalfWidth * 2, 30)
-    const outRatio = Math.min(1, outDistance / outMax)
-    return Math.max(0.05, 0.4 * (1 - outRatio * outRatio))
+    const overshoot = distance - spotHalfWidth
+    const outsideZone = spotHalfWidth * 2
+    const ratio = Math.min(1, overshoot / outsideZone)
+    const accuracy = 0.45 - ratio * 0.35
+    return Math.max(0.1, accuracy)
   }
 }
 

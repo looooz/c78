@@ -164,8 +164,6 @@
     <AnimalActionSheet
       v-model:visible="animalActionVisible"
       :animal="selectedAnimal"
-      :feeds="feeds"
-      :inventory="inventory"
       @feed="handleFeed"
       @collect="handleAnimalCollect"
     />
@@ -194,7 +192,7 @@ import ProcessingDialog from './components/ProcessingDialog.vue'
 import {
   getUser, getPlots, getInventory,
   plantCrop, waterPlot, harvestPlot, clearPlot,
-  buyFromShop, claimMiniGameReward, getShop,
+  buyFromShop, claimMiniGameReward,
   getAnimals, feedAnimal, collectAnimalProduct, expandPen,
   getOfflineEarnings, claimOfflineEarnings,
 } from './api.js'
@@ -204,7 +202,6 @@ const user = ref(null)
 const plots = ref([])
 const inventory = ref([])
 const animals = ref([])
-const feeds = ref([])
 const penInfo = ref({ capacity: 2, level: 1, currentCount: 0, expandCost: 400 })
 const isRefreshing = ref(false)
 const expandLoading = ref(false)
@@ -243,23 +240,10 @@ const loadAnimals = async () => {
     penInfo.value = res.pen
   } catch (e) { ElMessage.error(e.message) }
 }
-const loadFeeds = async () => {
-  try {
-    const shop = await getShop()
-    feeds.value = shop.filter(item => item.type === 'feed').map(f => ({
-      id: f.id,
-      name: f.name,
-      emoji: f.emoji,
-      feed_value: f.feedValue,
-      description: f.description,
-      price: f.price,
-    }))
-  } catch (e) { ElMessage.error(e.message) }
-}
 const refreshAll = async (showMsg = true) => {
   try {
     isRefreshing.value = true
-    await Promise.all([loadUser(), loadPlots(), loadInventory(), loadAnimals(), loadFeeds()])
+    await Promise.all([loadUser(), loadPlots(), loadInventory(), loadAnimals()])
     if (showMsg) {
       ElMessage({
         message: '✅ 农场数据已刷新',
@@ -360,11 +344,9 @@ const handleClear = async () => {
   } catch (e) { ElMessage.error(e.message) }
 }
 
-const handleFeed = async (data) => {
-  const animal = data.animal || data
-  const feedId = data.feedId
+const handleFeed = async (animal) => {
   try {
-    const res = await feedAnimal(animal.instanceId, feedId)
+    const res = await feedAnimal(animal.instanceId)
     ElMessage.success(res.message)
     animalActionVisible.value = false
     await Promise.all([loadInventory(), loadAnimals()])
@@ -508,8 +490,6 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  overflow-x: auto;
-  align-items: center;
 }
 .ranch-toolbar {
   display: flex;
