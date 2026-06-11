@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('./database');
+const crypto = require('crypto');
 
 const DEFAULT_USER_ID = 1;
 const EXP_PER_LEVEL = 100;
@@ -11,6 +12,26 @@ const MAX_PROCESSING_QUEUE = 3;
 const PEN_EXPAND_COST = (currentCap) => currentCap * 200;
 const DAILY_FISHING_LIMIT = 10;
 const FISHING_COST = 10;
+
+const sessions = new Map();
+
+const generateToken = () => crypto.randomBytes(32).toString('hex');
+
+const hashPassword = (password) => {
+  return crypto.createHash('sha256').update(password).digest('hex');
+};
+
+const getUserIdFromToken = (req) => {
+  const token = req.headers['x-auth-token'] || req.headers['authorization']?.replace('Bearer ', '');
+  if (!token) return null;
+  const session = sessions.get(token);
+  if (!session) return null;
+  if (Date.now() > session.expiresAt) {
+    sessions.delete(token);
+    return null;
+  }
+  return session.userId;
+};
 
 const expToLevel = (exp) => Math.floor(exp / EXP_PER_LEVEL) + 1;
 
@@ -93,10 +114,12 @@ const getInventoryQty = (userId, itemType, itemId) => {
 };
 
 const checkUser = (req, res, next) => {
-  const user = db.get('SELECT * FROM users WHERE id = ?', [DEFAULT_USER_ID]);
+  const userId = getUserIdFromToken(req) || DEFAULT_USER_ID;
+  const user = db.get('SELECT * FROM users WHERE id = ?', [userId]);
   if (!user) {
     return res.status(404).json({ error: '用户不存在' });
   }
+  req.userId = userId;
   req.user = user;
   next();
 };
@@ -109,15 +132,15 @@ router.get('/user', checkUser, (req, res) => {
   if (elapsed > 0 && water !== req.user.water) {
     db.run(
       'UPDATE users SET water = ?, last_water_update = ? WHERE id = ?',
-      [water, now, DEFAULT_USER_ID]
+      [water, now, req.userId]
     );
   }
 
-  checkDailyReset(DEFAULT_USER_ID);
+  checkDailyReset(req.userId);
   const today = getTodayStr();
-  const daily = db.get('SELECT * FROM daily_stats WHERE user_id = ? AND date = ?', [DEFAULT_USER_ID, today]);
+  const daily = db.get('SELECT * FROM daily_stats WHERE user_id = ? AND date = ?', [req.userId, today]);
 
-  const user = db.get('SELECT * FROM users WHERE id = ?', [DEFAULT_USER_ID]);
+  const user = db.get('SELECT * FROM users WHERE id = ?', [req.userId]);
   res.json({
     id: user.id,
     username: user.username,
@@ -154,7 +177,7 @@ router.get('/plots', checkUser, (req, res) => {
     LEFT JOIN crops c ON p.crop_id = c.id
     WHERE p.user_id = ?
     ORDER BY p.plot_index
-  `, [DEFAULT_USER_ID]);
+  `, [req.userId]);
 
   const now = Date.now();
   const plotsWithStatus = plots.map(p => {
@@ -214,13 +237,13 @@ router.post('/plant', checkUser, (req, res) => {
     return res.status(400).json({ error: '缺少参数' });
   }
 
-  const plot = db.get('SELECT * FROM plots WHERE user_id = ? AND plot_index = ?', [DEFAULT_USER_ID, plotIndex]);
+  const plot = db.get('SELECT * FROM plots WHERE user_id = ? AND plot_index = ?', [req.userId, plotIndex]);
   if (!plot) return res.status(404).json({ error: '土地不存在' });
   if (plot.crop_id) return res.status(400).json({ error: '该土地已有作物' });
 
   const inv = db.get(
     'SELECT quantity FROM inventory WHERE user_id = ? AND item_type = ? AND item_id = ?',
-    [DEFAULT_USER_ID, 'seed', cropId]
+    [req.userId, 'seed', cropId]
   );
   if (!inv || inv.quantity <= 0) return res.status(400).json({ error: '种子不足' });
 
@@ -231,11 +254,11 @@ router.post('/plant', checkUser, (req, res) => {
   db.transaction(() => {
     db.run(
       'UPDATE inventory SET quantity = quantity - 1 WHERE user_id = ? AND item_type = ? AND item_id = ?',
-      [DEFAULT_USER_ID, 'seed', cropId]
+      [req.userId, 'seed', cropId]
     );
     db.run(
       'UPDATE plots SET crop_id = ?, planted_at = ?, watered = 0, water_count = 0, is_harvested = 0 WHERE user_id = ? AND plot_index = ?',
-      [cropId, nowMs, DEFAULT_USER_ID, plotIndex]
+      [cropId, nowMs, req.userId, plotIndex]
     );
   });
 
@@ -246,7 +269,7 @@ router.post('/water', checkUser, (req, res) => {
   const { plotIndex } = req.body;
   if (plotIndex == null) return res.status(400).json({ error: '缺少参数' });
 
-  const plot = db.get('SELECT * FROM plots WHERE user_id = ? AND plot_index = ?', [DEFAULT_USER_ID, plotIndex]);
+  const plot = db.get('SELECT * FROM plots WHERE user_id = ? AND plot_index = ?', [req.userId, plotIndex]);
   if (!plot) return res.status(404).json({ error: '土地不存在' });
   if (!plot.crop_id) return res.status(400).json({ error: '空地无需浇水' });
   if (plot.is_harvested) return res.status(400).json({ error: '已收获无需浇水' });
@@ -260,14 +283,14 @@ router.post('/water', checkUser, (req, res) => {
   if (req.user.water <= 0) return res.status(400).json({ error: '水源不足，请等待水源自动恢复' });
 
   db.transaction(() => {
-    db.run('UPDATE users SET water = water - 1, last_water_update = ? WHERE id = ?', [now, DEFAULT_USER_ID]);
+    db.run('UPDATE users SET water = water - 1, last_water_update = ? WHERE id = ?', [now, req.userId]);
     db.run(
       'UPDATE plots SET watered = 1, water_count = water_count + 1 WHERE user_id = ? AND plot_index = ?',
-      [DEFAULT_USER_ID, plotIndex]
+      [req.userId, plotIndex]
     );
   });
 
-  const user = db.get('SELECT water FROM users WHERE id = ?', [DEFAULT_USER_ID]);
+  const user = db.get('SELECT water FROM users WHERE id = ?', [req.userId]);
   res.json({ success: true, message: '浇水成功！产量加成将生效', water: user.water });
 });
 
@@ -279,7 +302,7 @@ router.post('/harvest', checkUser, (req, res) => {
     SELECT p.*, c.sell_price, c.grow_time, c.exp_reward, c.name
     FROM plots p JOIN crops c ON p.crop_id = c.id
     WHERE p.user_id = ? AND p.plot_index = ?
-  `, [DEFAULT_USER_ID, plotIndex]);
+  `, [req.userId, plotIndex]);
 
   if (!plot) return res.status(404).json({ error: '土地不存在' });
   if (!plot.crop_id) return res.status(400).json({ error: '空地无作物' });
@@ -300,12 +323,12 @@ router.post('/harvest', checkUser, (req, res) => {
   let rewardMsg = '';
 
   db.transaction(() => {
-    db.run('UPDATE users SET coins = coins + ? WHERE id = ?', [coinsEarned, DEFAULT_USER_ID]);
-    levelUpInfo = addExp(DEFAULT_USER_ID, expEarned);
-    addInventory(DEFAULT_USER_ID, 'crop', plot.crop_id, cropAmount);
+    db.run('UPDATE users SET coins = coins + ? WHERE id = ?', [coinsEarned, req.userId]);
+    levelUpInfo = addExp(req.userId, expEarned);
+    addInventory(req.userId, 'crop', plot.crop_id, cropAmount);
     db.run(
       'UPDATE plots SET is_harvested = 1 WHERE user_id = ? AND plot_index = ?',
-      [DEFAULT_USER_ID, plotIndex]
+      [req.userId, plotIndex]
     );
   });
 
@@ -327,13 +350,13 @@ router.post('/clear', checkUser, (req, res) => {
   const { plotIndex } = req.body;
   if (plotIndex == null) return res.status(400).json({ error: '缺少参数' });
 
-  const plot = db.get('SELECT * FROM plots WHERE user_id = ? AND plot_index = ?', [DEFAULT_USER_ID, plotIndex]);
+  const plot = db.get('SELECT * FROM plots WHERE user_id = ? AND plot_index = ?', [req.userId, plotIndex]);
   if (!plot) return res.status(404).json({ error: '土地不存在' });
   if (!plot.is_harvested && plot.crop_id) return res.status(400).json({ error: '请先收获作物' });
 
   db.run(
     'UPDATE plots SET crop_id = NULL, planted_at = NULL, watered = 0, water_count = 0, is_harvested = 0 WHERE user_id = ? AND plot_index = ?',
-    [DEFAULT_USER_ID, plotIndex]
+    [req.userId, plotIndex]
   );
 
   res.json({ success: true, message: '土地已清理，可重新种植' });
@@ -402,7 +425,7 @@ router.get('/inventory', checkUser, (req, res) => {
     LEFT JOIN processed_products pp ON (i.item_type = 'processed_product' AND i.item_id = pp.id)
     LEFT JOIN fish fi ON (i.item_type = 'fish' AND i.item_id = fi.id)
     WHERE i.user_id = ? AND i.quantity > 0
-  `, [DEFAULT_USER_ID]);
+  `, [req.userId]);
 
   res.json(items.map(item => ({
     id: item.id,
@@ -492,33 +515,33 @@ router.post('/shop/buy', checkUser, (req, res) => {
   if (req.user.coins < totalCost) return res.status(400).json({ error: '金币不足' });
 
   if (itemType === 'animal') {
-    const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [DEFAULT_USER_ID]);
-    const count = db.get('SELECT COUNT(*) as c FROM user_animals WHERE user_id = ?', [DEFAULT_USER_ID]).c;
+    const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [req.userId]);
+    const count = db.get('SELECT COUNT(*) as c FROM user_animals WHERE user_id = ?', [req.userId]).c;
     if (count + quantity > pen.capacity) {
       return res.status(400).json({ error: `动物栏容量不足！当前${count}/${pen.capacity}，请扩建动物栏` });
     }
 
     const nowMs = Date.now();
     db.transaction(() => {
-      db.run('UPDATE users SET coins = coins - ? WHERE id = ?', [totalCost, DEFAULT_USER_ID]);
+      db.run('UPDATE users SET coins = coins - ? WHERE id = ?', [totalCost, req.userId]);
       for (let i = 0; i < quantity; i++) {
-        const usedSlots = db.all('SELECT pen_slot FROM user_animals WHERE user_id = ?', [DEFAULT_USER_ID]).map(r => r.pen_slot);
+        const usedSlots = db.all('SELECT pen_slot FROM user_animals WHERE user_id = ?', [req.userId]).map(r => r.pen_slot);
         let slot = 0;
         while (usedSlots.includes(slot)) slot++;
         db.run(
           'INSERT INTO user_animals (user_id, animal_id, pen_slot, bought_at, last_fed_at, last_product_at, hunger, is_sick) VALUES (?, ?, ?, ?, ?, ?, 0, 0)',
-          [DEFAULT_USER_ID, itemId, slot, nowMs, nowMs, nowMs]
+          [req.userId, itemId, slot, nowMs, nowMs, nowMs]
         );
       }
     });
   } else {
     db.transaction(() => {
-      db.run('UPDATE users SET coins = coins - ? WHERE id = ?', [totalCost, DEFAULT_USER_ID]);
-      addInventory(DEFAULT_USER_ID, itemType, itemId, quantity);
+      db.run('UPDATE users SET coins = coins - ? WHERE id = ?', [totalCost, req.userId]);
+      addInventory(req.userId, itemType, itemId, quantity);
     });
   }
 
-  const user = db.get('SELECT coins FROM users WHERE id = ?', [DEFAULT_USER_ID]);
+  const user = db.get('SELECT coins FROM users WHERE id = ?', [req.userId]);
   res.json({
     success: true,
     message: `购买成功！获得 ${quantity} 个${item.name}${itemType === 'animal' ? '，已放入动物栏' : ''}`,
@@ -528,7 +551,7 @@ router.post('/shop/buy', checkUser, (req, res) => {
 });
 
 router.get('/animals', checkUser, (req, res) => {
-  const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [DEFAULT_USER_ID]);
+  const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [req.userId]);
   const animals = db.all(`
     SELECT ua.*, a.name, a.emoji, a.baby_emoji, a.feed_cost, a.feed_interval, a.product_interval, a.product_amount,
            a.product_id, a.exp_reward, a.description, ap.name as product_name, ap.emoji as product_emoji, ap.sell_price as product_price
@@ -537,7 +560,7 @@ router.get('/animals', checkUser, (req, res) => {
     LEFT JOIN animal_products ap ON a.product_id = ap.id
     WHERE ua.user_id = ?
     ORDER BY ua.pen_slot
-  `, [DEFAULT_USER_ID]);
+  `, [req.userId]);
 
   const now = Date.now();
   const result = animals.map(a => {
@@ -603,7 +626,7 @@ router.get('/animals', checkUser, (req, res) => {
 const uaId = (a) => a.id;
 
 router.get('/animals/list-fix', checkUser, (req, res) => {
-  const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [DEFAULT_USER_ID]);
+  const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [req.userId]);
   const animalRows = db.all(`
     SELECT ua.*, a.name, a.emoji, a.baby_emoji, a.feed_interval, a.product_interval, a.product_amount,
            a.product_id, a.exp_reward, a.description, ap.name as product_name, ap.emoji as product_emoji, ap.sell_price as product_price
@@ -612,7 +635,7 @@ router.get('/animals/list-fix', checkUser, (req, res) => {
     LEFT JOIN animal_products ap ON a.product_id = ap.id
     WHERE ua.user_id = ?
     ORDER BY ua.pen_slot
-  `, [DEFAULT_USER_ID]);
+  `, [req.userId]);
 
   const now = Date.now();
   const result = animalRows.map(a => {
@@ -677,7 +700,7 @@ router.post('/animal/feed', checkUser, (req, res) => {
   const { instanceId, feedId } = req.body;
   if (!instanceId) return res.status(400).json({ error: '缺少参数' });
 
-  const ua = db.get('SELECT * FROM user_animals WHERE id = ? AND user_id = ?', [instanceId, DEFAULT_USER_ID]);
+  const ua = db.get('SELECT * FROM user_animals WHERE id = ? AND user_id = ?', [instanceId, req.userId]);
   if (!ua) return res.status(404).json({ error: '动物不存在' });
 
   const animal = db.get('SELECT * FROM animals WHERE id = ?', [ua.animal_id]);
@@ -688,7 +711,7 @@ router.post('/animal/feed', checkUser, (req, res) => {
 
   const feedInventory = allFeeds.map(f => ({
     ...f,
-    qty: getInventoryQty(DEFAULT_USER_ID, 'feed', f.id),
+    qty: getInventoryQty(req.userId, 'feed', f.id),
   }));
 
   const totalAvailable = feedInventory.reduce((sum, f) => sum + f.qty * f.feed_value, 0);
@@ -737,7 +760,7 @@ router.post('/animal/feed', checkUser, (req, res) => {
   const now = Date.now();
   db.transaction(() => {
     for (const uf of usedFeeds) {
-      removeInventory(DEFAULT_USER_ID, 'feed', uf.id, uf.qty);
+      removeInventory(req.userId, 'feed', uf.id, uf.qty);
     }
     db.run(
       'UPDATE user_animals SET last_fed_at = ?, hunger = 0 WHERE id = ?',
@@ -761,7 +784,7 @@ router.post('/animal/collect', checkUser, (req, res) => {
   const { instanceId } = req.body;
   if (!instanceId) return res.status(400).json({ error: '缺少参数' });
 
-  const ua = db.get('SELECT * FROM user_animals WHERE id = ? AND user_id = ?', [instanceId, DEFAULT_USER_ID]);
+  const ua = db.get('SELECT * FROM user_animals WHERE id = ? AND user_id = ?', [instanceId, req.userId]);
   if (!ua) return res.status(404).json({ error: '动物不存在' });
 
   const now = Date.now();
@@ -793,8 +816,8 @@ router.post('/animal/collect', checkUser, (req, res) => {
 
   let levelUpInfo = null;
   db.transaction(() => {
-    addInventory(DEFAULT_USER_ID, 'animal_product', animal.product_id, amount);
-    levelUpInfo = addExp(DEFAULT_USER_ID, expEarned);
+    addInventory(req.userId, 'animal_product', animal.product_id, amount);
+    levelUpInfo = addExp(req.userId, expEarned);
     db.run(
       'UPDATE user_animals SET last_product_at = ? WHERE id = ?',
       [now, instanceId]
@@ -821,21 +844,21 @@ router.post('/animal/collect', checkUser, (req, res) => {
 });
 
 router.post('/animal/pen-expand', checkUser, (req, res) => {
-  const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [DEFAULT_USER_ID]);
+  const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [req.userId]);
   const cost = PEN_EXPAND_COST(pen.capacity);
 
   if (req.user.coins < cost) return res.status(400).json({ error: `金币不足，需要${cost}金币` });
 
   db.transaction(() => {
-    db.run('UPDATE users SET coins = coins - ? WHERE id = ?', [cost, DEFAULT_USER_ID]);
+    db.run('UPDATE users SET coins = coins - ? WHERE id = ?', [cost, req.userId]);
     db.run(
       'UPDATE animal_pens SET capacity = capacity + 1, level = level + 1 WHERE user_id = ?',
-      [DEFAULT_USER_ID]
+      [req.userId]
     );
   });
 
-  const newPen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [DEFAULT_USER_ID]);
-  const user = db.get('SELECT coins FROM users WHERE id = ?', [DEFAULT_USER_ID]);
+  const newPen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [req.userId]);
+  const user = db.get('SELECT coins FROM users WHERE id = ?', [req.userId]);
   res.json({
     success: true,
     message: `动物栏扩建成功！容量提升到 ${newPen.capacity}`,
@@ -870,7 +893,7 @@ router.get('/recipes', checkUser, (req, res) => {
     const output = db.get('SELECT * FROM processed_products WHERE id = ?', [r.output_product_id]);
 
     const ingWithAvail = ingredients.map(ing => {
-      const qty = getInventoryQty(DEFAULT_USER_ID, ing.ingredient_type, ing.ingredient_id);
+      const qty = getInventoryQty(req.userId, ing.ingredient_type, ing.ingredient_id);
       return {
         type: ing.ingredient_type,
         id: ing.ingredient_id,
@@ -905,7 +928,7 @@ router.get('/recipes', checkUser, (req, res) => {
 
   const queueCount = db.get(
     'SELECT COUNT(*) as c FROM processing_queue WHERE user_id = ? AND is_collected = 0',
-    [DEFAULT_USER_ID]
+    [req.userId]
   ).c;
 
   res.json({
@@ -925,7 +948,7 @@ router.get('/processing-queue', checkUser, (req, res) => {
     JOIN processed_products pp ON r.output_product_id = pp.id
     WHERE pq.user_id = ? AND pq.is_collected = 0
     ORDER BY pq.started_at
-  `, [DEFAULT_USER_ID]);
+  `, [req.userId]);
 
   const now = Date.now();
   const result = rows.map(q => {
@@ -966,7 +989,7 @@ router.post('/process/start', checkUser, (req, res) => {
 
   const queueCount = db.get(
     'SELECT COUNT(*) as c FROM processing_queue WHERE user_id = ? AND is_collected = 0',
-    [DEFAULT_USER_ID]
+    [req.userId]
   ).c;
   if (queueCount >= MAX_PROCESSING_QUEUE) {
     return res.status(400).json({ error: `生产队列已满（${queueCount}/${MAX_PROCESSING_QUEUE}），请等待完成` });
@@ -977,7 +1000,7 @@ router.post('/process/start', checkUser, (req, res) => {
 
   const ingredients = db.all('SELECT * FROM recipe_ingredients WHERE recipe_id = ?', [recipeId]);
   for (const ing of ingredients) {
-    const qty = getInventoryQty(DEFAULT_USER_ID, ing.ingredient_type, ing.ingredient_id);
+    const qty = getInventoryQty(req.userId, ing.ingredient_type, ing.ingredient_id);
     if (qty < ing.quantity) {
       return res.status(400).json({ error: `原料不足` });
     }
@@ -987,17 +1010,17 @@ router.post('/process/start', checkUser, (req, res) => {
   const finishAt = now + recipe.process_time * 1000;
   db.transaction(() => {
     for (const ing of ingredients) {
-      removeInventory(DEFAULT_USER_ID, ing.ingredient_type, ing.ingredient_id, ing.quantity);
+      removeInventory(req.userId, ing.ingredient_type, ing.ingredient_id, ing.quantity);
     }
     db.run(
       'INSERT INTO processing_queue (user_id, recipe_id, started_at, finish_at, is_completed, is_collected) VALUES (?, ?, ?, ?, 0, 0)',
-      [DEFAULT_USER_ID, recipeId, now, finishAt]
+      [req.userId, recipeId, now, finishAt]
     );
   });
 
   const newQueueCount = db.get(
     'SELECT COUNT(*) as c FROM processing_queue WHERE user_id = ? AND is_collected = 0',
-    [DEFAULT_USER_ID]
+    [req.userId]
   ).c;
 
   res.json({
@@ -1025,7 +1048,7 @@ router.post('/process/collect', checkUser, (req, res) => {
     JOIN recipes r ON pq.recipe_id = r.id
     JOIN processed_products pp ON r.output_product_id = pp.id
     WHERE pq.id = ? AND pq.user_id = ?
-  `, [queueId, DEFAULT_USER_ID]);
+  `, [queueId, req.userId]);
 
   if (!q) return res.status(404).json({ error: '加工任务不存在' });
   if (q.is_collected) return res.status(400).json({ error: '已收取过成品' });
@@ -1038,7 +1061,7 @@ router.post('/process/collect', checkUser, (req, res) => {
   }
 
   db.transaction(() => {
-    addInventory(DEFAULT_USER_ID, 'processed_product', q.output_product_id, q.output_amount);
+    addInventory(req.userId, 'processed_product', q.output_product_id, q.output_amount);
     db.run(
       'UPDATE processing_queue SET is_completed = 1, is_collected = 1 WHERE id = ?',
       [queueId]
@@ -1089,18 +1112,18 @@ router.post('/inventory/sell', checkUser, (req, res) => {
     return res.status(400).json({ error: '该物品类型不可出售' });
   }
 
-  const curQty = getInventoryQty(DEFAULT_USER_ID, itemType, itemId);
+  const curQty = getInventoryQty(req.userId, itemType, itemId);
   const sellQty = Math.min(quantity, curQty);
   if (sellQty <= 0) return res.status(400).json({ error: '库存不足' });
 
   const totalCoins = sellPrice * sellQty;
 
   db.transaction(() => {
-    removeInventory(DEFAULT_USER_ID, itemType, itemId, sellQty);
-    db.run('UPDATE users SET coins = coins + ? WHERE id = ?', [totalCoins, DEFAULT_USER_ID]);
+    removeInventory(req.userId, itemType, itemId, sellQty);
+    db.run('UPDATE users SET coins = coins + ? WHERE id = ?', [totalCoins, req.userId]);
   });
 
-  const user = db.get('SELECT coins FROM users WHERE id = ?', [DEFAULT_USER_ID]);
+  const user = db.get('SELECT coins FROM users WHERE id = ?', [req.userId]);
   res.json({
     success: true,
     message: `出售成功！${itemName} x${sellQty}，获得 ${totalCoins} 金币`,
@@ -1144,7 +1167,7 @@ router.post('/mini-game/reward', checkUser, (req, res) => {
     }
   }
 
-  const levelUpInfo = addExp(DEFAULT_USER_ID, exp);
+  const levelUpInfo = addExp(req.userId, exp);
   const totalCoins = coins + bonusCoins;
 
   let msgParts = [];
@@ -1153,9 +1176,9 @@ router.post('/mini-game/reward', checkUser, (req, res) => {
 
   try {
     db.transaction(() => {
-      db.run('UPDATE users SET coins = coins + ? WHERE id = ?', [totalCoins, DEFAULT_USER_ID]);
+      db.run('UPDATE users SET coins = coins + ? WHERE id = ?', [totalCoins, req.userId]);
       for (const bi of bonusItems) {
-        addInventory(DEFAULT_USER_ID, 'seed', bi.id, bi.qty);
+        addInventory(req.userId, 'seed', bi.id, bi.qty);
       }
     });
   } catch (e) {
@@ -1169,7 +1192,7 @@ router.post('/mini-game/reward', checkUser, (req, res) => {
   if (bonusText) msgParts.push(`🎁 奖励物资：${bonusText}`);
   if (levelUpInfo.levelUp) msgParts.push(`🎉 升级到 Lv.${levelUpInfo.newLevel}！奖励 ${levelUpInfo.coinReward} 金币`);
 
-  const user = db.get('SELECT coins FROM users WHERE id = ?', [DEFAULT_USER_ID]);
+  const user = db.get('SELECT coins FROM users WHERE id = ?', [req.userId]);
   res.json({
     success: true,
     message: msgParts.join('；'),
@@ -1189,7 +1212,7 @@ router.post('/mini-game/reward', checkUser, (req, res) => {
 });
 
 router.get('/animals-corrected', checkUser, (req, res) => {
-  const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [DEFAULT_USER_ID]);
+  const pen = db.get('SELECT * FROM animal_pens WHERE user_id = ?', [req.userId]);
   const animalRows = db.all(`
     SELECT ua.id as instance_id, ua.animal_id, ua.pen_slot, ua.bought_at, ua.last_fed_at, ua.last_product_at, ua.hunger, ua.is_sick,
            a.name, a.emoji, a.baby_emoji, a.feed_cost, a.feed_interval, a.product_interval, a.product_amount,
@@ -1200,7 +1223,7 @@ router.get('/animals-corrected', checkUser, (req, res) => {
     LEFT JOIN animal_products ap ON a.product_id = ap.id
     WHERE ua.user_id = ?
     ORDER BY ua.pen_slot
-  `, [DEFAULT_USER_ID]);
+  `, [req.userId]);
 
   const now = Date.now();
   const animals = animalRows.map(a => {
@@ -1279,9 +1302,9 @@ router.get('/fish', (req, res) => {
 });
 
 router.get('/fishing/status', checkUser, (req, res) => {
-  checkDailyReset(DEFAULT_USER_ID);
+  checkDailyReset(req.userId);
   const today = getTodayStr();
-  const daily = db.get('SELECT * FROM daily_stats WHERE user_id = ? AND date = ?', [DEFAULT_USER_ID, today]);
+  const daily = db.get('SELECT * FROM daily_stats WHERE user_id = ? AND date = ?', [req.userId, today]);
 
   const recent = db.all(`
     SELECT uf.*, f.name, f.emoji, f.rarity, f.sell_price
@@ -1290,7 +1313,7 @@ router.get('/fishing/status', checkUser, (req, res) => {
     WHERE uf.user_id = ?
     ORDER BY uf.caught_at DESC
     LIMIT 10
-  `, [DEFAULT_USER_ID]);
+  `, [req.userId]);
 
   res.json({
     daily: {
@@ -1348,9 +1371,9 @@ router.post('/fishing/catch', checkUser, (req, res) => {
   const { accuracy } = req.body;
   const acc = accuracy == null ? 0.5 : Math.max(0, Math.min(1, parseFloat(accuracy)));
 
-  checkDailyReset(DEFAULT_USER_ID);
+  checkDailyReset(req.userId);
   const today = getTodayStr();
-  const daily = db.get('SELECT * FROM daily_stats WHERE user_id = ? AND date = ?', [DEFAULT_USER_ID, today]);
+  const daily = db.get('SELECT * FROM daily_stats WHERE user_id = ? AND date = ?', [req.userId, today]);
 
   if (daily && daily.fishing_count >= DAILY_FISHING_LIMIT) {
     return res.status(400).json({ error: `今日钓鱼次数已用完（${DAILY_FISHING_LIMIT}/${DAILY_FISHING_LIMIT}），明天再来吧！` });
@@ -1390,13 +1413,13 @@ router.post('/fishing/catch', checkUser, (req, res) => {
   let levelUpInfo = null;
 
   db.transaction(() => {
-    db.run('UPDATE users SET coins = coins - ? WHERE id = ?', [FISHING_COST, DEFAULT_USER_ID]);
+    db.run('UPDATE users SET coins = coins - ? WHERE id = ?', [FISHING_COST, req.userId]);
     db.run('INSERT INTO user_fishing (user_id, fish_id, weight, caught_at) VALUES (?, ?, ?, ?)',
-      [DEFAULT_USER_ID, fish.id, weight, now]);
+      [req.userId, fish.id, weight, now]);
     db.run('UPDATE daily_stats SET fishing_count = fishing_count + 1 WHERE user_id = ? AND date = ?',
-      [DEFAULT_USER_ID, today]);
-    addInventory(DEFAULT_USER_ID, 'fish', fish.id, 1);
-    levelUpInfo = addExp(DEFAULT_USER_ID, expReward);
+      [req.userId, today]);
+    addInventory(req.userId, 'fish', fish.id, 1);
+    levelUpInfo = addExp(req.userId, expReward);
   });
 
   const rarityText = { common: '普通', uncommon: '稀有', rare: '珍稀', epic: '传说' }[fish.rarity] || '普通';
@@ -1453,7 +1476,7 @@ router.get('/offline-earnings', checkUser, (req, res) => {
     FROM plots p
     JOIN crops c ON p.crop_id = c.id
     WHERE p.user_id = ? AND p.crop_id IS NOT NULL AND p.is_harvested = 0
-  `, [DEFAULT_USER_ID]);
+  `, [req.userId]);
 
   for (const plot of plots) {
     const planted = plot.planted_at || now;
@@ -1488,7 +1511,7 @@ router.get('/offline-earnings', checkUser, (req, res) => {
     JOIN animals a ON ua.animal_id = a.id
     JOIN animal_products ap ON a.product_id = ap.id
     WHERE ua.user_id = ?
-  `, [DEFAULT_USER_ID]);
+  `, [req.userId]);
 
   for (const animal of animals) {
     const lastProd = animal.last_product_at || animal.bought_at || now;
@@ -1554,6 +1577,7 @@ const formatDuration = (seconds) => {
 };
 
 router.post('/offline-earnings/claim', checkUser, (req, res) => {
+  const userId = req.userId;
   const now = Date.now();
   const lastLogin = req.user.last_login || req.user.created_at || now;
   const offlineSeconds = Math.floor((now - lastLogin) / 1000);
@@ -1574,7 +1598,7 @@ router.post('/offline-earnings/claim', checkUser, (req, res) => {
     FROM plots p
     JOIN crops c ON p.crop_id = c.id
     WHERE p.user_id = ? AND p.crop_id IS NOT NULL AND p.is_harvested = 0
-  `, [DEFAULT_USER_ID]);
+  `, [userId]);
 
   for (const plot of plots) {
     const planted = plot.planted_at || now;
@@ -1602,7 +1626,7 @@ router.post('/offline-earnings/claim', checkUser, (req, res) => {
     JOIN animals a ON ua.animal_id = a.id
     JOIN animal_products ap ON a.product_id = ap.id
     WHERE ua.user_id = ?
-  `, [DEFAULT_USER_ID]);
+  `, [userId]);
 
   for (const animal of animals) {
     const lastProd = animal.last_product_at || animal.bought_at || now;
@@ -1640,14 +1664,14 @@ router.post('/offline-earnings/claim', checkUser, (req, res) => {
 
   db.transaction(() => {
     db.run('UPDATE users SET coins = coins + ?, last_login = ? WHERE id = ?',
-      [totalCoins, now, DEFAULT_USER_ID]);
-    levelUpInfo = addExp(DEFAULT_USER_ID, totalExp);
+      [totalCoins, now, userId]);
+    levelUpInfo = addExp(userId, totalExp);
 
     for (const plot of plots) {
       const planted = plot.planted_at || now;
       const growMs = plot.grow_time * 1000;
       if (now - planted >= growMs) {
-        addInventory(DEFAULT_USER_ID, 'crop', plot.crop_id, 1);
+        addInventory(userId, 'crop', plot.crop_id, 1);
         db.run('UPDATE plots SET is_harvested = 1 WHERE id = ?', [plot.id]);
       }
     }
@@ -1661,7 +1685,7 @@ router.post('/offline-earnings/claim', checkUser, (req, res) => {
     }
 
     for (const [prodId, qty] of Object.entries(productAmounts)) {
-      addInventory(DEFAULT_USER_ID, 'animal_product', parseInt(prodId), qty);
+      addInventory(userId, 'animal_product', parseInt(prodId), qty);
     }
   });
 
@@ -1679,6 +1703,443 @@ router.post('/offline-earnings/claim', checkUser, (req, res) => {
     newLevel: levelUpInfo.newLevel,
     coinReward: levelUpInfo.coinReward,
     offlineTime: formatDuration(effectiveSeconds),
+  });
+});
+
+router.post('/auth/register', (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ error: '用户名和密码不能为空' });
+  }
+  if (username.length < 2 || username.length > 20) {
+    return res.status(400).json({ error: '用户名长度需在 2-20 个字符之间' });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ error: '密码长度不能少于 6 位' });
+  }
+
+  const existing = db.get('SELECT id FROM users WHERE username = ?', [username]);
+  if (existing) {
+    return res.status(400).json({ error: '用户名已被占用' });
+  }
+
+  const now = Date.now();
+  const hashedPwd = hashPassword(password);
+
+  let userId = null;
+  db.transaction(() => {
+    const result = db.run(
+      'INSERT INTO users (username, password, coins, level, exp, water, created_at, last_water_update, last_login) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [username, hashedPwd, 500, 1, 0, 20, now, now, now]
+    );
+    userId = result.lastInsertRowid;
+
+    for (let i = 0; i < 6; i++) {
+      db.run(
+        'INSERT INTO plots (user_id, plot_index, watered) VALUES (?, ?, 0)',
+        [userId, i]
+      );
+    }
+    db.run(
+      'INSERT INTO animal_pens (user_id, capacity, level) VALUES (?, ?, ?)',
+      [userId, 2, 1]
+    );
+    db.run(
+      'INSERT INTO inventory (user_id, item_type, item_id, quantity) VALUES (?, ?, ?, ?)',
+      [userId, 'seed', 1, 3]
+    );
+    db.run(
+      'INSERT INTO inventory (user_id, item_type, item_id, quantity) VALUES (?, ?, ?, ?)',
+      [userId, 'seed', 2, 2]
+    );
+    db.run(
+      'INSERT INTO inventory (user_id, item_type, item_id, quantity) VALUES (?, ?, ?, ?)',
+      [userId, 'feed', 1, 5]
+    );
+    db.run(
+      'INSERT INTO user_settings (user_id, sound_enabled, music_enabled, graphics_quality, volume, show_tutorial) VALUES (?, 1, 1, ?, 0.7, 1)',
+      [userId, 'high']
+    );
+  });
+
+  const token = generateToken();
+  sessions.set(token, { userId, expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000 });
+
+  res.json({
+    success: true,
+    message: '注册成功！',
+    token,
+    user: {
+      id: userId,
+      username,
+      level: 1,
+      coins: 500,
+    },
+  });
+});
+
+router.post('/auth/login', (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ error: '用户名和密码不能为空' });
+  }
+
+  const user = db.get('SELECT * FROM users WHERE username = ?', [username]);
+  if (!user) {
+    return res.status(400).json({ error: '用户名或密码错误' });
+  }
+
+  const hashedPwd = hashPassword(password);
+  if (user.password !== hashedPwd) {
+    return res.status(400).json({ error: '用户名或密码错误' });
+  }
+
+  const now = Date.now();
+  db.run('UPDATE users SET last_login = ? WHERE id = ?', [now, user.id]);
+
+  const token = generateToken();
+  sessions.set(token, { userId: user.id, expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000 });
+
+  res.json({
+    success: true,
+    message: '登录成功！',
+    token,
+    user: {
+      id: user.id,
+      username: user.username,
+      level: user.level,
+      coins: user.coins,
+    },
+  });
+});
+
+router.post('/auth/logout', checkUser, (req, res) => {
+  const token = req.headers['x-auth-token'] || req.headers['authorization']?.replace('Bearer ', '');
+  if (token) {
+    sessions.delete(token);
+  }
+  res.json({ success: true, message: '已退出登录' });
+});
+
+router.get('/auth/me', checkUser, (req, res) => {
+  res.json({
+    id: req.user.id,
+    username: req.user.username,
+    level: req.user.level,
+    coins: req.user.coins,
+  });
+});
+
+router.get('/decorations', checkUser, (req, res) => {
+  const decorations = db.all('SELECT * FROM decorations ORDER BY id');
+  const result = decorations.map(d => ({
+    id: d.id,
+    name: d.name,
+    price: d.price,
+    emoji: d.emoji,
+    category: d.category,
+    width: d.width,
+    height: d.height,
+    description: d.description,
+    unlockLevel: d.unlock_level,
+    unlocked: req.user.level >= d.unlock_level,
+  }));
+  res.json(result);
+});
+
+router.get('/user/decorations', checkUser, (req, res) => {
+  const userId = req.userId;
+  const items = db.all(`
+    SELECT ud.*, d.name, d.emoji, d.price, d.category, d.width, d.height, d.description
+    FROM user_decorations ud
+    JOIN decorations d ON ud.decoration_id = d.id
+    WHERE ud.user_id = ? AND ud.quantity > 0
+  `, [userId]);
+  res.json(items.map(item => ({
+    id: item.id,
+    decorationId: item.decoration_id,
+    name: item.name,
+    emoji: item.emoji,
+    quantity: item.quantity,
+    category: item.category,
+    price: item.price,
+    width: item.width,
+    height: item.height,
+    description: item.description,
+  })));
+});
+
+router.post('/decoration/buy', checkUser, (req, res) => {
+  const userId = req.userId;
+  const { decorationId, quantity = 1 } = req.body;
+  if (!decorationId || quantity < 1) {
+    return res.status(400).json({ error: '参数错误' });
+  }
+
+  const decor = db.get('SELECT * FROM decorations WHERE id = ?', [decorationId]);
+  if (!decor) {
+    return res.status(404).json({ error: '装饰品不存在' });
+  }
+  if (req.user.level < decor.unlock_level) {
+    return res.status(400).json({ error: `等级不足，需要 Lv.${decor.unlock_level} 解锁` });
+  }
+
+  const totalCost = decor.price * quantity;
+  if (req.user.coins < totalCost) {
+    return res.status(400).json({ error: '金币不足' });
+  }
+
+  db.transaction(() => {
+    db.run('UPDATE users SET coins = coins - ? WHERE id = ?', [totalCost, userId]);
+    const existing = db.get(
+      'SELECT id FROM user_decorations WHERE user_id = ? AND decoration_id = ?',
+      [userId, decorationId]
+    );
+    if (existing) {
+      db.run(
+        'UPDATE user_decorations SET quantity = quantity + ? WHERE id = ?',
+        [quantity, existing.id]
+      );
+    } else {
+      db.run(
+        'INSERT INTO user_decorations (user_id, decoration_id, quantity) VALUES (?, ?, ?)',
+        [userId, decorationId, quantity]
+      );
+    }
+  });
+
+  const user = db.get('SELECT coins FROM users WHERE id = ?', [userId]);
+  res.json({
+    success: true,
+    message: `购买成功！获得 ${quantity} 个${decor.name}`,
+    coins: user.coins,
+    quantity,
+  });
+});
+
+router.get('/placed-decorations', checkUser, (req, res) => {
+  const userId = req.userId;
+  const items = db.all(`
+    SELECT pd.*, d.name, d.emoji, d.category, d.width, d.height
+    FROM placed_decorations pd
+    JOIN decorations d ON pd.decoration_id = d.id
+    WHERE pd.user_id = ?
+    ORDER BY pd.layer, pd.placed_at
+  `, [userId]);
+  res.json(items.map(item => ({
+    id: item.id,
+    decorationId: item.decoration_id,
+    name: item.name,
+    emoji: item.emoji,
+    category: item.category,
+    x: item.x,
+    y: item.y,
+    layer: item.layer,
+    width: item.width,
+    height: item.height,
+    placedAt: item.placed_at,
+  })));
+});
+
+router.post('/decoration/place', checkUser, (req, res) => {
+  const userId = req.userId;
+  const { decorationId, x, y, layer = 0 } = req.body;
+  if (!decorationId || x == null || y == null) {
+    return res.status(400).json({ error: '参数错误' });
+  }
+
+  const userDecor = db.get(
+    'SELECT * FROM user_decorations WHERE user_id = ? AND decoration_id = ? AND quantity > 0',
+    [userId, decorationId]
+  );
+  if (!userDecor) {
+    return res.status(400).json({ error: '背包中没有该装饰品' });
+  }
+
+  let placedId = null;
+  const now = Date.now();
+  db.transaction(() => {
+    db.run(
+      'UPDATE user_decorations SET quantity = quantity - 1 WHERE id = ?',
+      [userDecor.id]
+    );
+    const result = db.run(
+      'INSERT INTO placed_decorations (user_id, decoration_id, x, y, layer, placed_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [userId, decorationId, x, y, layer, now]
+    );
+    placedId = result.lastInsertRowid;
+  });
+
+  const placed = db.get(`
+    SELECT pd.*, d.name, d.emoji, d.category, d.width, d.height
+    FROM placed_decorations pd
+    JOIN decorations d ON pd.decoration_id = d.id
+    WHERE pd.id = ?
+  `, [placedId]);
+
+  res.json({
+    success: true,
+    message: '放置成功！',
+    decoration: {
+      id: placed.id,
+      decorationId: placed.decoration_id,
+      name: placed.name,
+      emoji: placed.emoji,
+      x: placed.x,
+      y: placed.y,
+      layer: placed.layer,
+    },
+  });
+});
+
+router.post('/decoration/move', checkUser, (req, res) => {
+  const userId = req.userId;
+  const { placedId, x, y, layer } = req.body;
+  if (!placedId || x == null || y == null) {
+    return res.status(400).json({ error: '参数错误' });
+  }
+
+  const placed = db.get(
+    'SELECT * FROM placed_decorations WHERE id = ? AND user_id = ?',
+    [placedId, userId]
+  );
+  if (!placed) {
+    return res.status(404).json({ error: '装饰品不存在' });
+  }
+
+  let updates = ['x = ?', 'y = ?'];
+  let params = [x, y];
+  if (layer != null) {
+    updates.push('layer = ?');
+    params.push(layer);
+  }
+  params.push(placedId);
+
+  db.run(
+    `UPDATE placed_decorations SET ${updates.join(', ')} WHERE id = ?`,
+    params
+  );
+
+  res.json({
+    success: true,
+    message: '移动成功！',
+    x, y,
+    layer: layer != null ? layer : placed.layer,
+  });
+});
+
+router.post('/decoration/remove', checkUser, (req, res) => {
+  const userId = req.userId;
+  const { placedId } = req.body;
+  if (!placedId) {
+    return res.status(400).json({ error: '参数错误' });
+  }
+
+  const placed = db.get(
+    'SELECT * FROM placed_decorations WHERE id = ? AND user_id = ?',
+    [placedId, userId]
+  );
+  if (!placed) {
+    return res.status(404).json({ error: '装饰品不存在' });
+  }
+
+  db.transaction(() => {
+    db.run('DELETE FROM placed_decorations WHERE id = ?', [placedId]);
+    const existing = db.get(
+      'SELECT id FROM user_decorations WHERE user_id = ? AND decoration_id = ?',
+      [userId, placed.decoration_id]
+    );
+    if (existing) {
+      db.run(
+        'UPDATE user_decorations SET quantity = quantity + 1 WHERE id = ?',
+        [existing.id]
+      );
+    } else {
+      db.run(
+        'INSERT INTO user_decorations (user_id, decoration_id, quantity) VALUES (?, ?, 1)',
+        [userId, placed.decoration_id]
+      );
+    }
+  });
+
+  res.json({
+    success: true,
+    message: '已收回背包',
+  });
+});
+
+router.get('/settings', checkUser, (req, res) => {
+  const userId = req.userId;
+  let settings = db.get('SELECT * FROM user_settings WHERE user_id = ?', [userId]);
+  if (!settings) {
+    db.run(
+      'INSERT INTO user_settings (user_id, sound_enabled, music_enabled, graphics_quality, volume, show_tutorial) VALUES (?, 1, 1, ?, 0.7, 1)',
+      [userId, 'high']
+    );
+    settings = db.get('SELECT * FROM user_settings WHERE user_id = ?', [userId]);
+  }
+  res.json({
+    soundEnabled: !!settings.sound_enabled,
+    musicEnabled: !!settings.music_enabled,
+    graphicsQuality: settings.graphics_quality,
+    volume: settings.volume,
+    showTutorial: !!settings.show_tutorial,
+  });
+});
+
+router.post('/settings', checkUser, (req, res) => {
+  const userId = req.userId;
+  const { soundEnabled, musicEnabled, graphicsQuality, volume, showTutorial } = req.body;
+
+  let settings = db.get('SELECT * FROM user_settings WHERE user_id = ?', [userId]);
+  if (!settings) {
+    db.run(
+      'INSERT INTO user_settings (user_id, sound_enabled, music_enabled, graphics_quality, volume, show_tutorial) VALUES (?, 1, 1, ?, 0.7, 1)',
+      [userId, 'high']
+    );
+    settings = db.get('SELECT * FROM user_settings WHERE user_id = ?', [userId]);
+  }
+
+  const updates = [];
+  const params = [];
+
+  if (soundEnabled != null) {
+    updates.push('sound_enabled = ?');
+    params.push(soundEnabled ? 1 : 0);
+  }
+  if (musicEnabled != null) {
+    updates.push('music_enabled = ?');
+    params.push(musicEnabled ? 1 : 0);
+  }
+  if (graphicsQuality) {
+    updates.push('graphics_quality = ?');
+    params.push(graphicsQuality);
+  }
+  if (volume != null) {
+    updates.push('volume = ?');
+    params.push(Math.max(0, Math.min(1, volume)));
+  }
+  if (showTutorial != null) {
+    updates.push('show_tutorial = ?');
+    params.push(showTutorial ? 1 : 0);
+  }
+
+  if (updates.length > 0) {
+    params.push(userId);
+    db.run(`UPDATE user_settings SET ${updates.join(', ')} WHERE user_id = ?`, params);
+  }
+
+  const newSettings = db.get('SELECT * FROM user_settings WHERE user_id = ?', [userId]);
+  res.json({
+    success: true,
+    message: '设置已保存',
+    settings: {
+      soundEnabled: !!newSettings.sound_enabled,
+      musicEnabled: !!newSettings.music_enabled,
+      graphicsQuality: newSettings.graphics_quality,
+      volume: newSettings.volume,
+      showTutorial: !!newSettings.show_tutorial,
+    },
   });
 });
 

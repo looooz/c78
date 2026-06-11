@@ -1,24 +1,103 @@
 <template>
-  <canvas
-    ref="canvasRef"
-    :width="canvasWidth"
-    :height="canvasHeight"
-    class="farm-canvas"
-    @click="onCanvasClick"
-    @mousemove="onCanvasHover"
-  />
+  <div class="farm-canvas-container">
+    <div class="canvas-toolbar">
+      <el-button
+        :type="editMode ? 'warning' : 'primary'"
+        size="small"
+        @click="toggleEditMode"
+      >
+        <el-icon><Edit /></el-icon>
+        {{ editMode ? '退出装饰' : '装饰模式' }}
+      </el-button>
+      <span v-if="editMode" class="edit-hint">
+        💡 从右侧选择装饰品拖入农场，或拖动已有装饰品调整位置
+      </span>
+    </div>
+    <div class="canvas-area">
+      <div class="canvas-wrapper">
+        <canvas
+          ref="canvasRef"
+          :width="canvasWidth"
+          :height="canvasHeight"
+          class="farm-canvas"
+          @click="onCanvasClick"
+          @mousemove="onCanvasHover"
+          @mousedown="onMouseDown"
+          @mouseup="onMouseUp"
+          @mouseleave="onMouseLeave"
+        />
+        <div
+          v-if="editMode && draggingDecoration"
+          class="drag-preview"
+          :style="{
+            left: dragPos.x + 'px',
+            top: dragPos.y + 'px',
+          }"
+        >
+          {{ draggingDecoration.emoji }}
+        </div>
+      </div>
+
+      <div v-if="editMode" class="decoration-palette">
+      <div class="palette-title">🎨 我的装饰品</div>
+      <div class="palette-list scrollbar-thin">
+        <div
+          v-for="item in userDecorations"
+          :key="'ud-' + item.decorationId"
+          class="palette-item"
+          :class="{ disabled: item.quantity <= 0 }"
+          @mousedown="startDragFromPalette(item, $event)"
+        >
+          <span class="item-emoji">{{ item.emoji }}</span>
+          <span class="item-name">{{ item.name }}</span>
+          <span class="item-qty">x{{ item.quantity }}</span>
+        </div>
+        <div v-if="userDecorations.length === 0" class="empty-palette">
+          <el-empty description="暂无装饰品" :image-size="80">
+            <el-button type="primary" size="small" @click="$emit('openShop')">
+              去商店购买
+            </el-button>
+          </el-empty>
+        </div>
+      </div>
+      <div class="palette-tip">
+        点击已放置的装饰品可选中，按 Delete 键或点击下方按钮收回
+      </div>
+      <el-button
+        v-if="selectedDecoration"
+        type="danger"
+        size="small"
+        @click="removeSelectedDecoration"
+      >
+        收回选中的装饰品
+      </el-button>
+    </div>
+    </div>
+  </div>
 </template>
 
 <script setup>
-import { ref, onMounted, watch, nextTick } from 'vue'
+import { ref, onMounted, watch, nextTick, computed } from 'vue'
+import { Edit } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  getUserDecorations,
+  getPlacedDecorations,
+  placeDecoration,
+  moveDecoration,
+  removeDecoration,
+} from '../api.js'
+import { playClick, playBuy } from '../utils/sound.js'
 
 const props = defineProps({
   plots: { type: Array, default: () => [] },
 })
-const emit = defineEmits(['plot-click'])
+
+const emit = defineEmits(['plot-click', 'openShop', 'decorationsChanged'])
 
 const canvasRef = ref(null)
 const hoveredIndex = ref(-1)
+const editMode = ref(false)
 const cols = 3
 const rows = 2
 const gap = 30
@@ -28,6 +107,37 @@ const plotH = 180
 
 const canvasWidth = cols * plotW + (cols + 1) * gap + padding * 2
 const canvasHeight = rows * plotH + (rows + 1) * gap + padding * 2
+
+const userDecorations = ref([])
+const placedDecorations = ref([])
+const selectedDecoration = ref(null)
+const draggingDecoration = ref(null)
+const dragPos = ref({ x: 0, y: 0 })
+const dragOffset = ref({ x: 0, y: 0 })
+const isDraggingPlaced = ref(false)
+const dragPlacedId = ref(null)
+
+const loadDecorations = async () => {
+  try {
+    const [userDecos, placedDecos] = await Promise.all([
+      getUserDecorations(),
+      getPlacedDecorations(),
+    ])
+    userDecorations.value = userDecos
+    placedDecorations.value = placedDecos
+  } catch (e) {
+    console.warn('加载装饰品失败:', e.message)
+  }
+}
+
+const toggleEditMode = () => {
+  playClick()
+  editMode.value = !editMode.value
+  selectedDecoration.value = null
+  if (editMode.value) {
+    loadDecorations()
+  }
+}
 
 const getPlotRect = (index) => {
   const col = index % cols
@@ -47,6 +157,7 @@ const getStageEmoji = (plot) => {
   if (p >= 33) return plot.stage2 || '🌿'
   return plot.stage1 || '🌱'
 }
+
 const getStageLabel = (plot) => {
   const p = Math.min(100, plot.progress || 0)
   if (p >= 100) return { text: '成熟', color: '#FF6F00' }
@@ -279,6 +390,33 @@ const drawStatusBadge = (ctx, plot, rect) => {
   ctx.restore()
 }
 
+const drawDecorations = (ctx) => {
+  if (!editMode.value) return
+
+  placedDecorations.value.forEach((deco) => {
+    const isSelected = selectedDecoration.value?.id === deco.id
+    const size = 48
+
+    ctx.save()
+    ctx.font = `${size}px sans-serif`
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+
+    if (isSelected) {
+      ctx.shadowColor = '#FFD700'
+      ctx.shadowBlur = 20
+      ctx.strokeStyle = '#FFD700'
+      ctx.lineWidth = 3
+      roundRect(ctx, deco.x - size / 2 - 6, deco.y - size / 2 - 6, size + 12, size + 12, 8)
+      ctx.stroke()
+    }
+
+    ctx.globalAlpha = isDraggingPlaced.value && dragPlacedId.value === deco.id ? 0.5 : 1
+    ctx.fillText(deco.emoji, deco.x, deco.y)
+    ctx.restore()
+  })
+}
+
 const roundRect = (ctx, x, y, w, h, r) => {
   ctx.beginPath()
   ctx.moveTo(x + r, y)
@@ -310,6 +448,8 @@ const render = () => {
     drawPlot(ctx, plot, getPlotRect(i), hoveredIndex.value === i)
   }
 
+  drawDecorations(ctx)
+
   ctx.font = 'bold 22px sans-serif'
   ctx.fillStyle = '#fff'
   ctx.textAlign = 'center'
@@ -334,7 +474,41 @@ const getIndexFromEvent = (e) => {
   return -1
 }
 
+const getDecorationAtPoint = (x, y) => {
+  const size = 48
+  for (let i = placedDecorations.value.length - 1; i >= 0; i--) {
+    const deco = placedDecorations.value[i]
+    if (
+      x >= deco.x - size / 2 &&
+      x <= deco.x + size / 2 &&
+      y >= deco.y - size / 2 &&
+      y <= deco.y + size / 2
+    ) {
+      return deco
+    }
+  }
+  return null
+}
+
 const onCanvasClick = (e) => {
+  if (editMode.value) {
+    const canvas = canvasRef.value
+    const rect = canvas.getBoundingClientRect()
+    const scaleX = canvas.width / rect.width
+    const scaleY = canvas.height / rect.height
+    const mx = (e.clientX - rect.left) * scaleX
+    const my = (e.clientY - rect.top) * scaleY
+
+    const deco = getDecorationAtPoint(mx, my)
+    if (deco) {
+      playClick()
+      selectedDecoration.value = deco
+      return
+    }
+    selectedDecoration.value = null
+    return
+  }
+
   const idx = getIndexFromEvent(e)
   if (idx === -1) return
   const plotMap = new Map()
@@ -347,6 +521,154 @@ const onCanvasHover = (e) => {
   hoveredIndex.value = getIndexFromEvent(e)
 }
 
+const startDragFromPalette = (item, e) => {
+  if (item.quantity <= 0) return
+  playClick()
+  draggingDecoration.value = item
+  isDraggingPlaced.value = false
+  dragPos.value = { x: e.clientX, y: e.clientY }
+
+  const onMouseMove = (ev) => {
+    dragPos.value = { x: ev.clientX, y: ev.clientY }
+  }
+
+  const onMouseUp = (ev) => {
+    document.removeEventListener('mousemove', onMouseMove)
+    document.removeEventListener('mouseup', onMouseUp)
+
+    const canvas = canvasRef.value
+    const rect = canvas.getBoundingClientRect()
+    const scaleX = canvas.width / rect.width
+    const scaleY = canvas.height / rect.height
+    const mx = (ev.clientX - rect.left) * scaleX
+    const my = (ev.clientY - rect.top) * scaleY
+
+    if (mx > 0 && mx < canvasWidth && my > 0 && my < canvasHeight) {
+      placeDecorationItem(item.decorationId, mx, my)
+    }
+
+    draggingDecoration.value = null
+  }
+
+  document.addEventListener('mousemove', onMouseMove)
+  document.addEventListener('mouseup', onMouseUp)
+}
+
+const placeDecorationItem = async (decorationId, x, y) => {
+  try {
+    playBuy()
+    const res = await placeDecoration(decorationId, x, y, 0)
+    ElMessage.success(res.message)
+    await loadDecorations()
+    emit('decorationsChanged')
+  } catch (e) {
+    ElMessage.error(e.message)
+  }
+}
+
+const onMouseDown = (e) => {
+  if (!editMode.value) return
+
+  const canvas = canvasRef.value
+  const rect = canvas.getBoundingClientRect()
+  const scaleX = canvas.width / rect.width
+  const scaleY = canvas.height / rect.height
+  const mx = (e.clientX - rect.left) * scaleX
+  const my = (e.clientY - rect.top) * scaleY
+
+  const deco = getDecorationAtPoint(mx, my)
+  if (deco) {
+    playClick()
+    isDraggingPlaced.value = true
+    dragPlacedId.value = deco.id
+    selectedDecoration.value = deco
+    dragOffset.value = { x: mx - deco.x, y: my - deco.y }
+
+    const onMouseMove = (ev) => {
+      const canvas2 = canvasRef.value
+      const rect2 = canvas2.getBoundingClientRect()
+      const sx = canvas2.width / rect2.width
+      const sy = canvas2.height / rect2.height
+      const newX = (ev.clientX - rect2.left) * sx - dragOffset.value.x
+      const newY = (ev.clientY - rect2.top) * sy - dragOffset.value.y
+
+      const idx = placedDecorations.value.findIndex(d => d.id === deco.id)
+      if (idx !== -1) {
+        placedDecorations.value[idx].x = newX
+        placedDecorations.value[idx].y = newY
+      }
+    }
+
+    const onMouseUp = async (ev) => {
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+
+      const canvas2 = canvasRef.value
+      const rect2 = canvas2.getBoundingClientRect()
+      const sx = canvas2.width / rect2.width
+      const sy = canvas2.height / rect2.height
+      const finalX = (ev.clientX - rect2.left) * sx - dragOffset.value.x
+      const finalY = (ev.clientY - rect2.top) * sy - dragOffset.value.y
+
+      try {
+        await moveDecoration(deco.id, finalX, finalY, 0)
+        await loadDecorations()
+        emit('decorationsChanged')
+      } catch (e) {
+        ElMessage.error(e.message)
+        await loadDecorations()
+      }
+
+      isDraggingPlaced.value = false
+      dragPlacedId.value = null
+    }
+
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+  }
+}
+
+const onMouseUp = () => {
+}
+
+const onMouseLeave = () => {
+  hoveredIndex.value = -1
+}
+
+const removeSelectedDecoration = async () => {
+  if (!selectedDecoration.value) return
+  try {
+    await ElMessageBox.confirm('确定要收回这个装饰品吗？', '提示', {
+      confirmButtonText: '收回',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    await removeDecoration(selectedDecoration.value.id)
+    playClick()
+    ElMessage.success('已收回背包')
+    selectedDecoration.value = null
+    await loadDecorations()
+    emit('decorationsChanged')
+  } catch (e) {
+    if (e !== 'cancel' && e?.message !== 'cancel') {
+      ElMessage.error(e.message)
+    }
+  }
+}
+
+const handleKeyDown = (e) => {
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (editMode.value && selectedDecoration.value) {
+      removeSelectedDecoration()
+    }
+  }
+  if (e.key === 'Escape') {
+    if (editMode.value) {
+      toggleEditMode()
+    }
+  }
+}
+
 let animFrame = null
 const animate = () => {
   render()
@@ -355,16 +677,155 @@ const animate = () => {
 
 onMounted(() => {
   nextTick(animate)
+  document.addEventListener('keydown', handleKeyDown)
+  loadDecorations()
 })
+
 watch(() => props.plots, () => render(), { deep: true })
+watch(editMode, () => {
+  if (editMode.value) {
+    loadDecorations()
+  }
+})
+
+defineExpose({
+  refreshDecorations: loadDecorations,
+})
 </script>
 
 <style scoped>
+.farm-canvas-container {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+}
+
+.canvas-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 12px;
+  backdrop-filter: blur(4px);
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.edit-hint {
+  font-size: 13px;
+  color: #666;
+  flex: 1;
+}
+
+.canvas-area {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.canvas-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
 .farm-canvas {
   display: block;
   cursor: pointer;
   max-width: 100%;
   height: auto;
   border-radius: 16px;
+}
+
+.decoration-palette {
+  width: 180px;
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 12px;
+  padding: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  backdrop-filter: blur(8px);
+  flex-shrink: 0;
+}
+
+.palette-title {
+  font-weight: bold;
+  font-size: 14px;
+  margin-bottom: 8px;
+  color: #333;
+  text-align: center;
+}
+
+.palette-list {
+  max-height: 300px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.palette-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: #f5f7fa;
+  border-radius: 8px;
+  cursor: grab;
+  transition: all 0.2s;
+  user-select: none;
+}
+
+.palette-item:hover {
+  background: #e8f5e9;
+  transform: translateX(2px);
+}
+
+.palette-item:active {
+  cursor: grabbing;
+}
+
+.palette-item.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.item-emoji {
+  font-size: 24px;
+}
+
+.item-name {
+  flex: 1;
+  font-size: 13px;
+  color: #333;
+}
+
+.item-qty {
+  font-size: 12px;
+  color: #666;
+  font-weight: bold;
+}
+
+.palette-tip {
+  font-size: 11px;
+  color: #999;
+  text-align: center;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+.empty-palette {
+  padding: 20px 0;
+}
+
+.drag-preview {
+  position: fixed;
+  font-size: 48px;
+  pointer-events: none;
+  z-index: 1000;
+  transform: translate(-50%, -50%);
+  opacity: 0.8;
 }
 </style>

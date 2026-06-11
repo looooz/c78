@@ -1,8 +1,13 @@
 const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const dbPath = path.join(__dirname, 'farm.db');
+
+const hashPassword = (password) => {
+  return crypto.createHash('sha256').update(password).digest('hex');
+};
 
 let db = null;
 let inTransaction = false;
@@ -272,6 +277,93 @@ const init = async () => {
     );
   `);
 
+  exec(`
+    CREATE TABLE IF NOT EXISTS decorations (
+      id INTEGER PRIMARY KEY,
+      name TEXT UNIQUE NOT NULL,
+      price INTEGER NOT NULL,
+      emoji TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'decor',
+      width INTEGER NOT NULL DEFAULT 1,
+      height INTEGER NOT NULL DEFAULT 1,
+      description TEXT,
+      unlock_level INTEGER NOT NULL DEFAULT 1
+    );
+  `);
+
+  exec(`
+    CREATE TABLE IF NOT EXISTS user_decorations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      decoration_id INTEGER NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+
+  exec(`
+    CREATE TABLE IF NOT EXISTS placed_decorations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      decoration_id INTEGER NOT NULL,
+      x INTEGER NOT NULL DEFAULT 0,
+      y INTEGER NOT NULL DEFAULT 0,
+      layer INTEGER NOT NULL DEFAULT 0,
+      placed_at INTEGER NOT NULL
+    );
+  `);
+
+  exec(`
+    CREATE TABLE IF NOT EXISTS user_settings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER UNIQUE NOT NULL,
+      sound_enabled INTEGER NOT NULL DEFAULT 1,
+      music_enabled INTEGER NOT NULL DEFAULT 1,
+      graphics_quality TEXT NOT NULL DEFAULT 'high',
+      volume REAL NOT NULL DEFAULT 0.7,
+      show_tutorial INTEGER NOT NULL DEFAULT 1
+    );
+  `);
+
+  const userCols = all("PRAGMA table_info(users)");
+  const passwordCol = userCols.find(c => c.name === 'password');
+  if (!passwordCol) {
+    console.log('🔐 为用户表添加 password 字段...');
+    exec('ALTER TABLE users ADD COLUMN password TEXT');
+    run("UPDATE users SET password = ? WHERE id = 1", [hashPassword('123456')]);
+  }
+
+  const decorCount = get('SELECT COUNT(*) as count FROM decorations').count;
+  if (decorCount === 0) {
+    console.log('🏡 插入装饰品数据...');
+    const decorations = [
+      [1, '木栅栏', 30, '🪵', 'fence', 1, 1, '质朴的木栅栏，围住你的农场', 1],
+      [2, '稻草人', 80, '🎃', 'decor', 1, 1, '可爱的稻草人，守护作物', 1],
+      [3, '风车', 200, '🌀', 'decor', 1, 1, '旋转的风车，农场的标志', 2],
+      [4, '水井', 150, '🪣', 'decor', 1, 1, '古老的水井，提供水源', 2],
+      [5, '石栅栏', 60, '🧱', 'fence', 1, 1, '坚固的石栅栏，更高档', 3],
+      [6, '花园灯', 50, '🏮', 'decor', 1, 1, '温馨的花园灯，夜晚照明', 2],
+      [7, '长椅', 70, '🪑', 'decor', 1, 1, '舒适的长椅，休息一下', 2],
+      [8, '喷泉', 300, '⛲', 'decor', 1, 1, '精美的喷泉，提升农场格调', 4],
+    ];
+    transaction(() => {
+      for (const d of decorations) {
+        run(
+          'INSERT INTO decorations (id, name, price, emoji, category, width, height, description, unlock_level) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          d
+        );
+      }
+    });
+  }
+
+  const settingsCount = get('SELECT COUNT(*) as count FROM user_settings').count;
+  if (settingsCount === 0) {
+    console.log('⚙️ 初始化用户设置...');
+    run(
+      'INSERT INTO user_settings (user_id, sound_enabled, music_enabled, graphics_quality, volume, show_tutorial) VALUES (?, 1, 1, ?, 0.7, 1)',
+      [1, 'high']
+    );
+  }
+
   save();
 
   const cropCount = get('SELECT COUNT(*) as count FROM crops').count;
@@ -438,8 +530,8 @@ const init = async () => {
     });
   }
 
-  const userCols = all("PRAGMA table_info(users)");
-  const userColCheck = userCols.find(c => c.name === 'last_login');
+  const userColInfo = all("PRAGMA table_info(users)");
+  const userColCheck = userColInfo.find(c => c.name === 'last_login');
   if (!userColCheck) {
     console.log('🔧 为用户表添加 last_login 字段...');
     exec('ALTER TABLE users ADD COLUMN last_login INTEGER');
@@ -451,8 +543,8 @@ const init = async () => {
     console.log('👤 创建默认玩家...');
     const nowMs = Date.now();
     run(
-      'INSERT INTO users (id, username, coins, level, exp, water, created_at, last_water_update, last_login) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [1, '农夫小明', 500, 1, 0, 20, nowMs, nowMs, nowMs]
+      'INSERT INTO users (id, username, password, coins, level, exp, water, created_at, last_water_update, last_login) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [1, '农夫小明', hashPassword('123456'), 500, 1, 0, 20, nowMs, nowMs, nowMs]
     );
     const userId = 1;
 

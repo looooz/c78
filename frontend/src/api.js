@@ -1,8 +1,22 @@
 import axios from 'axios'
 
+const TOKEN_KEY = 'farm_game_token'
+
+export const getToken = () => localStorage.getItem(TOKEN_KEY)
+export const setToken = (token) => localStorage.setItem(TOKEN_KEY, token)
+export const clearToken = () => localStorage.removeItem(TOKEN_KEY)
+
 const api = axios.create({
   baseURL: '/api',
   timeout: 10000,
+})
+
+api.interceptors.request.use((config) => {
+  const token = getToken()
+  if (token) {
+    config.headers['x-auth-token'] = token
+  }
+  return config
 })
 
 api.interceptors.response.use(
@@ -78,3 +92,42 @@ export const getOfflineEarnings = () =>
 
 export const claimOfflineEarnings = () =>
   api.post('/offline-earnings/claim')
+
+export const register = (username, password) =>
+  api.post('/auth/register', { username, password })
+
+export const login = (username, password) =>
+  api.post('/auth/login', { username, password })
+
+export const logout = () =>
+  api.post('/auth/logout')
+
+export const getCurrentUser = () =>
+  api.get('/auth/me')
+
+export const getDecorations = () =>
+  api.get('/decorations')
+
+export const getUserDecorations = () =>
+  api.get('/user/decorations')
+
+export const buyDecoration = (decorationId, quantity = 1) =>
+  api.post('/decoration/buy', { decorationId, quantity })
+
+export const getPlacedDecorations = () =>
+  api.get('/placed-decorations')
+
+export const placeDecoration = (decorationId, x, y, layer = 0) =>
+  api.post('/decoration/place', { decorationId, x, y, layer })
+
+export const moveDecoration = (placedId, x, y, layer) =>
+  api.post('/decoration/move', { placedId, x, y, layer })
+
+export const removeDecoration = (placedId) =>
+  api.post('/decoration/remove', { placedId })
+
+export const getSettings = () =>
+  api.get('/settings')
+
+export const saveSettings = (settings) =>
+  api.post('/settings', settings)

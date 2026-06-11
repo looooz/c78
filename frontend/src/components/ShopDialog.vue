@@ -157,20 +157,81 @@
           </div>
         </div>
       </el-tab-pane>
+
+      <el-tab-pane label="🏡 装饰" name="decoration">
+        <div class="tip-banner">
+          <el-alert
+            title="💡 购买装饰品后可在农场装饰模式下放置，美化你的农场"
+            type="success"
+            :closable="false"
+            show-icon
+          />
+        </div>
+        <div class="shop-grid scrollbar-thin">
+          <div
+            v-for="item in decorationItems"
+            :key="'d-' + item.id"
+            class="shop-card"
+            :class="{ 'can-not-afford': userCoins < item.price || !item.unlocked, locked: !item.unlocked }"
+          >
+            <div class="card-top">
+              <span class="emoji">{{ item.emoji }}</span>
+              <div class="text-info">
+                <div class="name">{{ item.name }}</div>
+                <div class="meta">
+                  <span title="分类">
+                    {{ item.category === 'fence' ? '🚧 栅栏' : '🎨 装饰' }}
+                  </span>
+                  <span title="大小">📐 {{ item.width }}x{{ item.height }}</span>
+                </div>
+                <div class="desc">{{ item.description }}</div>
+                <div v-if="!item.unlocked" class="unlock-hint">
+                  <el-tag size="mini" type="info">🔒 Lv.{{ item.unlockLevel }} 解锁</el-tag>
+                </div>
+              </div>
+            </div>
+            <div class="card-bottom">
+              <div class="price-tag">
+                <span class="coin">💰</span>
+                <span class="amount">{{ item.price }}</span>
+              </div>
+              <div class="buy-area">
+                <el-input-number
+                  v-model="quantities['decoration-' + item.id]"
+                  :min="1"
+                  :max="99"
+                  size="small"
+                  controls-position="right"
+                  style="width: 100px;"
+                  :disabled="!item.unlocked"
+                />
+                <el-button
+                  type="success"
+                  :disabled="userCoins < item.price * (quantities['decoration-' + item.id] || 1) || !item.unlocked"
+                  @click="onBuyDecoration(item)"
+                >
+                  {{ item.unlocked ? '购买' : '未解锁' }}
+                </el-button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-tab-pane>
     </el-tabs>
   </el-dialog>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getShop } from '../api.js'
+import { getShop, getDecorations, buyDecoration } from '../api.js'
+import { playBuy, playError } from '../utils/sound.js'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
   userCoins: { type: Number, default: 0 },
 })
-const emit = defineEmits(['update:visible', 'buy'])
+const emit = defineEmits(['update:visible', 'buy', 'buyDecoration'])
 
 const visible = computed({
   get: () => props.visible,
@@ -179,6 +240,7 @@ const visible = computed({
 
 const activeCategory = ref('seed')
 const shopItems = ref([])
+const decorationItems = ref([])
 const quantities = reactive({})
 
 const seedItems = computed(() => shopItems.value.filter(i => i.type === 'seed'))
@@ -194,10 +256,32 @@ const onBuy = (item) => {
   const qty = quantities[item.type + '-' + item.id] || 1
   const cost = item.price * qty
   if (props.userCoins < cost) {
+    playError()
     ElMessage.warning('金币不足')
     return
   }
+  playBuy()
   emit('buy', item.type, item.id, qty)
+}
+
+const onBuyDecoration = async (item) => {
+  const qty = quantities['decoration-' + item.id] || 1
+  const cost = item.price * qty
+  if (props.userCoins < cost) {
+    playError()
+    ElMessage.warning('金币不足')
+    return
+  }
+  try {
+    playBuy()
+    const res = await buyDecoration(item.id, qty)
+    ElMessage.success(res.message)
+    emit('buyDecoration', res)
+    await loadDecorations()
+  } catch (e) {
+    playError()
+    ElMessage.error(e.message)
+  }
 }
 
 const loadShop = async () => {
@@ -212,8 +296,23 @@ const loadShop = async () => {
   }
 }
 
+const loadDecorations = async () => {
+  try {
+    const items = await getDecorations()
+    decorationItems.value = items
+    items.forEach(i => {
+      if (quantities['decoration-' + i.id] == null) quantities['decoration-' + i.id] = 1
+    })
+  } catch (e) {
+    ElMessage.error(e.message)
+  }
+}
+
 watch(() => props.visible, (v) => {
-  if (v) loadShop()
+  if (v) {
+    loadShop()
+    loadDecorations()
+  }
 })
 </script>
 
