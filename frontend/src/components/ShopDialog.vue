@@ -231,7 +231,7 @@ const props = defineProps({
   visible: { type: Boolean, default: false },
   userCoins: { type: Number, default: 0 },
 })
-const emit = defineEmits(['update:visible', 'buy', 'buyDecoration'])
+const emit = defineEmits(['update:visible', 'buy', 'buy-decoration'])
 
 const visible = computed({
   get: () => props.visible,
@@ -276,7 +276,7 @@ const onBuyDecoration = async (item) => {
     playBuy()
     const res = await buyDecoration(item.id, qty)
     ElMessage.success(res.message)
-    emit('buyDecoration', res)
+    emit('buy-decoration', res)
     await loadDecorations()
   } catch (e) {
     playError()

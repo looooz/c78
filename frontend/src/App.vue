@@ -8,17 +8,44 @@
       <div class="bird bird-2">🐦</div>
     </div>
 
+    <AuthDialog
+      v-model:visible="authVisible"
+      @success="handleAuthSuccess"
+    />
+
+    <SettingsDialog
+      v-model:visible="settingsVisible"
+      :current-user="currentUser"
+      @logout="handleLogout"
+      @login="authVisible = true"
+    />
+
+    <div v-if="!isLoggedIn" class="login-landing">
+      <div class="landing-card">
+        <div class="landing-icon">🌾</div>
+        <h1 class="landing-title">快乐农场</h1>
+        <p class="landing-subtitle">欢迎来到休闲模拟经营游戏</p>
+        <div class="landing-features">
+          <div class="feature-item">🌱 种植作物</div>
+          <div class="feature-item">🐔 养殖动物</div>
+          <div class="feature-item">🎨 装饰农场</div>
+          <div class="feature-item">🎣 趣味小游戏</div>
+        </div>
+        <el-button type="primary" size="large" @click="authVisible = true" class="landing-btn">
+          <el-icon><User /></el-icon>
+          开始游戏（登录 / 注册）
+        </el-button>
+      </div>
+    </div>
+
+    <template v-else>
     <header class="top-bar">
       <UserPanel :user="user" />
       <div class="top-bar-actions">
         <el-button circle @click="openSettings" title="设置">
           <el-icon><Setting /></el-icon>
         </el-button>
-        <el-button v-if="!isLoggedIn" type="primary" @click="authVisible = true">
-          <el-icon><User /></el-icon>
-          登录
-        </el-button>
-        <el-dropdown v-else @command="onUserMenuCommand">
+        <el-dropdown @command="onUserMenuCommand">
           <el-button type="success">
             <el-icon><Avatar /></el-icon>
             {{ user?.username || '用户' }}
@@ -132,18 +159,6 @@
       @reward="handleGameReward"
     />
 
-    <SettingsDialog
-      v-model:visible="settingsVisible"
-      :current-user="currentUser"
-      @logout="handleLogout"
-      @login="authVisible = true"
-    />
-
-    <AuthDialog
-      v-model:visible="authVisible"
-      @success="handleAuthSuccess"
-    />
-
     <el-dialog
       v-model="offlineEarningsVisible"
       title="📦 离线收益"
@@ -241,6 +256,7 @@
         </div>
       </div>
     </transition>
+    </template>
   </div>
 </template>
 
@@ -368,6 +384,7 @@ const refreshAll = async (showMsg = true) => {
 }
 
 const onPlotClick = (plot) => {
+  if (!requireLogin()) return
   if (plot.status === 'empty') {
     selectedPlotIndex.value = plot.index
     seedDialogVisible.value = true
@@ -378,16 +395,19 @@ const onPlotClick = (plot) => {
 }
 
 const onAnimalClick = (animal) => {
+  if (!requireLogin()) return
   selectedAnimal.value = animal
   animalActionVisible.value = true
 }
 
 const onSlotEmptyClick = (slotIndex) => {
+  if (!requireLogin()) return
   ElMessage.info(`🏡 栏位 #${slotIndex + 1} 空闲，去商店购买动物放入吧！`)
   setTimeout(() => { shopVisible.value = true }, 400)
 }
 
 const onExpandPen = async () => {
+  if (!requireLogin()) return
   const cost = penInfo.value?.expandCost || 0
   try {
     await ElMessageBox.confirm(
@@ -416,6 +436,7 @@ const onExpandPen = async () => {
 }
 
 const handlePlant = async (cropId) => {
+  if (!requireLogin()) return
   try {
     const res = await plantCrop(selectedPlotIndex.value, cropId)
     playPlant()
@@ -429,6 +450,7 @@ const handlePlant = async (cropId) => {
 }
 
 const handleWater = async () => {
+  if (!requireLogin()) return
   try {
     const res = await waterPlot(selectedPlot.value.index)
     playWater()
@@ -442,6 +464,7 @@ const handleWater = async () => {
 }
 
 const handleHarvest = async () => {
+  if (!requireLogin()) return
   try {
     const res = await harvestPlot(selectedPlot.value.index)
     playHarvest()
@@ -478,6 +501,7 @@ const handleHarvest = async () => {
 }
 
 const handleClear = async () => {
+  if (!requireLogin()) return
   try {
     const res = await clearPlot(selectedPlot.value.index)
     playClick()
@@ -491,6 +515,7 @@ const handleClear = async () => {
 }
 
 const handleFeed = async (animal) => {
+  if (!requireLogin()) return
   try {
     const res = await feedAnimal(animal.instanceId)
     playAnimal()
@@ -504,6 +529,7 @@ const handleFeed = async (animal) => {
 }
 
 const handleAnimalCollect = async (animal) => {
+  if (!requireLogin()) return
   try {
     const res = await collectAnimalProduct(animal.instanceId)
     playCoin()
@@ -528,6 +554,7 @@ const handleAnimalCollect = async (animal) => {
 }
 
 const handleBuy = async (itemType, itemId, quantity) => {
+  if (!requireLogin()) return
   try {
     const res = await buyFromShop(itemType, itemId, quantity)
     playBuy()
@@ -545,6 +572,7 @@ const handleBuy = async (itemType, itemId, quantity) => {
 }
 
 const handleBuyDecoration = async () => {
+  if (!requireLogin()) return
   await Promise.all([loadUser(), loadPlots()])
   if (farmRef.value) {
     farmRef.value.refreshDecorations()
@@ -552,6 +580,7 @@ const handleBuyDecoration = async () => {
 }
 
 const handleGameReward = async (payload) => {
+  if (!requireLogin()) return
   try {
     const res = payload?.data || payload
     playFishCatch()
@@ -590,6 +619,7 @@ const checkOfflineEarnings = async () => {
 }
 
 const claimOffline = async () => {
+  if (!requireLogin()) return
   try {
     claimingOffline.value = true
     const res = await claimOfflineEarnings()
@@ -610,6 +640,7 @@ const claimOffline = async () => {
 }
 
 const openShop = () => {
+  if (!requireLogin()) return
   playClick()
   shopVisible.value = true
 }
@@ -620,6 +651,7 @@ const openSettings = () => {
 }
 
 const onDecorationsChanged = () => {
+  if (!isLoggedIn.value) return
   loadUser()
 }
 
@@ -638,8 +670,12 @@ const handleLogout = async () => {
   plots.value = []
   inventory.value = []
   animals.value = []
+  if (timer) {
+    clearInterval(timer)
+    timer = null
+  }
   ElMessage.success('已退出登录')
-  await refreshAll()
+  authVisible.value = true
 }
 
 const onUserMenuCommand = (command) => {
@@ -657,20 +693,46 @@ watch(graphicsQuality, (val) => {
   document.body.setAttribute('data-graphics', val)
 })
 
+watch(authVisible, (val) => {
+  if (!val && !isLoggedIn.value) {
+    setTimeout(() => {
+      authVisible.value = true
+    }, 100)
+  }
+})
+
+const requireLogin = () => {
+  if (!isLoggedIn.value) {
+    playError()
+    authVisible.value = true
+    ElMessage.warning('请先登录后再操作')
+    return false
+  }
+  return true
+}
+
 onMounted(async () => {
   await loadSettings()
   if (getToken()) {
-    isLoggedIn.value = true
+    try {
+      isLoggedIn.value = true
+      await refreshAll()
+      setTimeout(() => {
+        checkOfflineEarnings()
+      }, 500)
+      timer = setInterval(() => {
+        loadPlots()
+        loadUser()
+        if (currentView.value === 'ranch') loadAnimals()
+      }, 2000)
+    } catch (e) {
+      clearToken()
+      isLoggedIn.value = false
+      authVisible.value = true
+    }
+  } else {
+    authVisible.value = true
   }
-  await refreshAll()
-  setTimeout(() => {
-    checkOfflineEarnings()
-  }, 500)
-  timer = setInterval(() => {
-    loadPlots()
-    loadUser()
-    if (currentView.value === 'ranch') loadAnimals()
-  }, 2000)
 })
 
 onBeforeUnmount(() => {
@@ -687,6 +749,75 @@ onBeforeUnmount(() => {
   background: linear-gradient(180deg, #87CEEB 0%, #98FB98 40%, #8B4513 100%);
   position: relative;
   overflow: hidden;
+}
+
+.login-landing {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  z-index: 1;
+  padding: 20px;
+}
+
+.landing-card {
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 24px;
+  padding: 48px 56px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(8px);
+  text-align: center;
+  max-width: 480px;
+  width: 100%;
+}
+
+.landing-icon {
+  font-size: 80px;
+  margin-bottom: 16px;
+  animation: bounce 2s ease-in-out infinite;
+}
+
+@keyframes bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+.landing-title {
+  font-size: 36px;
+  font-weight: bold;
+  color: #5D4037;
+  margin: 0 0 8px 0;
+}
+
+.landing-subtitle {
+  font-size: 16px;
+  color: #795548;
+  margin: 0 0 32px 0;
+}
+
+.landing-features {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 32px;
+}
+
+.feature-item {
+  background: linear-gradient(135deg, #81C784 0%, #66BB6A 100%);
+  color: white;
+  padding: 14px 16px;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  box-shadow: 0 4px 12px rgba(102, 187, 106, 0.3);
+}
+
+.landing-btn {
+  width: 100%;
+  font-size: 18px;
+  padding: 14px 24px;
+  border-radius: 14px;
 }
 
 .bg-decoration {

@@ -391,10 +391,8 @@ const drawStatusBadge = (ctx, plot, rect) => {
 }
 
 const drawDecorations = (ctx) => {
-  if (!editMode.value) return
-
   placedDecorations.value.forEach((deco) => {
-    const isSelected = selectedDecoration.value?.id === deco.id
+    const isSelected = editMode.value && selectedDecoration.value?.id === deco.id
     const size = 48
 
     ctx.save()
